@@ -88,7 +88,6 @@ enum Token {
   If,
   Return,
   True,
-  Type,
   Var,
   While,
 }
@@ -169,6 +168,7 @@ function advance(lexer: Lexer): void {
       case ',': lexer.token = Token.Comma; break;
       case ';': lexer.token = Token.Semicolon; break;
       case ':': lexer.token = Token.Colon; break;
+      case '?': lexer.token = Token.QuestionMark; break;
       case '.': lexer.token = Token.Dot; break;
       case '(': lexer.token = Token.OpenParenthesis; break;
       case ')': lexer.token = Token.CloseParenthesis; break;
@@ -270,7 +270,6 @@ function advance(lexer: Lexer): void {
             case 'if': lexer.token = Token.If; break;
             case 'return': lexer.token = Token.Return; break;
             case 'true': lexer.token = Token.True; break;
-            case 'type': lexer.token = Token.Type; break;
             case 'var': lexer.token = Token.Var; break;
             case 'while': lexer.token = Token.While; break;
           }
@@ -306,8 +305,13 @@ interface Decl {
 
 type DeclKind =
   {kind: 'Var', type: Type, value: Expr} |
-  {kind: 'Type', ctors: Ctor[]} |
-  {kind: 'Def', args: Arg[], ret: Type, body: Stmt[]};
+  {kind: 'Type', params: Param[], ctors: Ctor[]} |
+  {kind: 'Def', params: Param[], args: Arg[], ret: Type, body: Stmt[]};
+
+interface Param {
+  range: Range;
+  name: string;
+}
 
 interface Ctor {
   range: Range;
@@ -372,7 +376,8 @@ type ExprKind =
   {kind: 'Unary', op: UnOp, value: Expr} |
   {kind: 'Binary', op: BinOp, left: Expr, right: Expr} |
   {kind: 'Call', target: Expr, args: Expr[]} |
-  {kind: 'Dot', target: Expr, name: string};
+  {kind: 'Dot', target: Expr, name: string} |
+  {kind: 'Index', target: Expr, value: Expr};
 
 interface Type {
   range: Range;
@@ -382,6 +387,8 @@ interface Type {
 type TypeKind =
   {kind: 'Void'} |
   {kind: 'Inferred'} |
+  {kind: 'Array', type: Type} |
+  {kind: 'Option', type: Type} |
   {kind: 'Name', name: string} |
   {kind: 'Generic', name: string, params: Type[]};
 
@@ -407,12 +414,25 @@ function unexpected(lexer: Lexer): void {
   appendToLog(lexer.log, currentRange(lexer), `Unexpected ${Token[lexer.token]}`);
 }
 
+function parseTypeSuffix(lexer: Lexer, type: Type): Type | null {
+  while (true) {
+    if (eat(lexer, Token.OpenBracket)) {
+      if (!expect(lexer, Token.CloseBracket)) return null;
+      type = {range: spanSince(lexer, type.range.start), kind: {kind: 'Array', type}};
+    } else if (eat(lexer, Token.QuestionMark)) {
+      type = {range: spanSince(lexer, type.range.start), kind: {kind: 'Option', type}};
+    } else {
+      return type;
+    }
+  }
+}
+
 function parseType(lexer: Lexer): Type | null {
   const start = lexer.start;
   const name = currentText(lexer);
   if (!expect(lexer, Token.Identifier)) return null;
   if (!eat(lexer, Token.LessThan)) {
-    return {range: spanSince(lexer, start), kind: {kind: 'Name', name}};
+    return parseTypeSuffix(lexer, {range: spanSince(lexer, start), kind: {kind: 'Name', name}});
   }
 
   const params: Type[] = [];
@@ -428,7 +448,7 @@ function parseType(lexer: Lexer): Type | null {
 
   eat(lexer, Token.Newline);
   if (!expect(lexer, Token.GreaterThan)) return null;
-  return {range: spanSince(lexer, start), kind: {kind: 'Generic', name, params}};
+  return parseTypeSuffix(lexer, {range: spanSince(lexer, start), kind: {kind: 'Generic', name, params}});
 }
 
 function parsePrefix(lexer: Lexer): Expr | null {
@@ -634,6 +654,14 @@ function parseExpr(lexer: Lexer, level: number): Expr | null {
         break;
       }
 
+      case Token.OpenBracket: {
+        advance(lexer);
+        const value = parseExpr(lexer, LEVEL_LOWEST);
+        if (value === null || !expect(lexer, Token.CloseBracket)) return null;
+        left = {range: spanSince(lexer, start), kind: {kind: 'Index', target: left, value}};
+        break;
+      }
+
       case Token.OpenParenthesis: {
         const args: Expr[] = [];
         advance(lexer);
@@ -666,7 +694,8 @@ function parseExpr(lexer: Lexer, level: number): Expr | null {
         break;
       }
 
-      default: return left;
+      default:
+        return left;
     }
   }
 }
@@ -778,6 +807,28 @@ function parseBlock(lexer: Lexer): Stmt[] | null {
   return stmts;
 }
 
+function parseParams(lexer: Lexer): Param[] | null {
+  if (!eat(lexer, Token.LessThan)) {
+    return [];
+  }
+
+  const params: Param[] = [];
+  eat(lexer, Token.Newline);
+
+  while (lexer.token !== Token.GreaterThan) {
+    const start = lexer.start;
+    const name = currentText(lexer);
+    if (!expect(lexer, Token.Identifier)) return null;
+    params.push({range: spanSince(lexer, start), name});
+    if (!eat(lexer, Token.Comma)) break;
+    eat(lexer, Token.Newline);
+  }
+
+  eat(lexer, Token.Newline);
+  if (!expect(lexer, Token.GreaterThan)) return null;
+  return params;
+}
+
 function parse(log: Log, text: string): Module | null {
   const lexer = createLexer(log, text);
   const decls: Decl[] = [];
@@ -808,6 +859,8 @@ function parse(log: Log, text: string): Module | null {
         advance(lexer);
         const name = currentText(lexer);
         if (!expect(lexer, Token.Identifier)) return null;
+        const params = parseParams(lexer);
+        if (params === null) return null;
         const args = parseArgs(lexer);
         if (args === null) return null;
 
@@ -823,15 +876,22 @@ function parse(log: Log, text: string): Module | null {
         if (ret === null) return null;
         const body = parseBlock(lexer);
         if (body === null) return null;
-        decls.push({range: spanSince(lexer, start), name, kind: {kind: 'Def', args, ret, body}});
+        decls.push({range: spanSince(lexer, start), name, kind: {kind: 'Def', params, args, ret, body}});
         break;
       }
 
-      case Token.Type: {
+      case Token.Identifier: {
+        if (currentText(lexer) !== 'type') {
+          unexpected(lexer);
+          return null;
+        }
+
         advance(lexer);
         const ctors: Ctor[] = [];
         const name = currentText(lexer);
         if (!expect(lexer, Token.Identifier)) return null;
+        const params = parseParams(lexer);
+        if (params === null) return null;
 
         // Block form
         if (eat(lexer, Token.OpenBrace)) {
@@ -843,6 +903,13 @@ function parse(log: Log, text: string): Module | null {
             const args: Arg[] | null = lexer.token === Token.Newline ? [] : parseArgs(lexer);
             if (args === null) return null;
             ctors.push({range: spanSince(lexer, start), name, args});
+
+            // Recover if there's a semicolon or comma after a constructor
+            if (lexer.token === Token.Semicolon || lexer.token === Token.Comma) {
+              unexpected(lexer);
+              advance(lexer);
+            }
+
             if (!eat(lexer, Token.Newline)) break;
           }
           if (!expect(lexer, Token.CloseBrace)) return null;
@@ -855,7 +922,7 @@ function parse(log: Log, text: string): Module | null {
           ctors.push({range: spanSince(lexer, start), name, args});
         }
 
-        decls.push({range: spanSince(lexer, start), name, kind: {kind: 'Type', ctors}});
+        decls.push({range: spanSince(lexer, start), name, kind: {kind: 'Type', params, ctors}});
         break;
       }
 
