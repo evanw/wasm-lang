@@ -964,6 +964,108 @@ function parse(log: Log, text: string): Module | null {
 
 ////////////////////////////////////////////////////////////////////////////////
 
+interface InsRef {
+  // If this is negative, this is the constant stored at constants[~index].
+  // Otherwise this is the index of a previous instruction in this block.
+  index: number;
+}
+
+type Ins =
+  {kind: 'Nop'} |
+  {kind: 'Alias', value: InsRef} |
+  {kind: 'Call', index: number, args: InsRef[]} |
+
+  {kind: 'PtrGlobal', index: number} |
+  {kind: 'PtrStack', index: number} |
+
+  {kind: 'MemNew', size: InsRef} |
+  {kind: 'MemDelete', ptr: InsRef, size: InsRef} |
+  {kind: 'MemCopy', from: InsRef, to: InsRef, size: number, align: number} |
+
+  {kind: 'MemGet8', ptr: InsRef, offset: number} |
+  {kind: 'MemSet8', ptr: InsRef, offset: number, value: InsRef} |
+  {kind: 'MemGet32', ptr: InsRef, offset: number} |
+  {kind: 'MemSet32', ptr: InsRef, offset: number, value: InsRef} |
+
+  {kind: 'LocalGet', local: number} |
+  {kind: 'LocalSet', local: number, value: InsRef} |
+
+  {kind: 'Retain', ptr: InsRef} |
+  {kind: 'Release', ptr: InsRef, dtor: number} |
+
+  {kind: 'Eq32', left: InsRef, right: InsRef} |
+  {kind: 'NotEq32', left: InsRef, right: InsRef} |
+  {kind: 'Lt32S', left: InsRef, right: InsRef} |
+  {kind: 'Lt32U', left: InsRef, right: InsRef} |
+  {kind: 'LtEq32S', left: InsRef, right: InsRef} |
+  {kind: 'LtEq32U', left: InsRef, right: InsRef} |
+
+  {kind: 'Add32', left: InsRef, right: InsRef} |
+  {kind: 'Sub32', left: InsRef, right: InsRef} |
+  {kind: 'Mul32', left: InsRef, right: InsRef} |
+  {kind: 'Div32S', left: InsRef, right: InsRef} |
+  {kind: 'Div32U', left: InsRef, right: InsRef};
+
+type Jump =
+  {kind: 'Goto', target: number} |
+  {kind: 'Return', value: InsRef} |
+  {kind: 'Branch', value: InsRef, yes: number, no: number};
+
+interface BasicBlock {
+  values: Ins[];
+  jump: Jump;
+
+  // This map is updated every time a local is loaded or stored in this block.
+  // It's used to optimize away "LocalGet" calls if a local was already loaded.
+  previousLocals: {[index: number]: InsRef};
+}
+
+interface Graph {
+  blocks: BasicBlock[];
+
+  // This stores any constants indexed by "InsRef"
+  constants: number[];
+
+  // This stores the byte size of each local (used by the "LocalGet" and "LocalSet" instructions)
+  locals: number[];
+
+  // This stores the byte size of each stack slot (used by the "PtrStack" instruction)
+  stack: number[];
+}
+
+function createGraph(): Graph {
+  return {
+    blocks: [],
+    constants: [0],
+    locals: [],
+    stack: [],
+  };
+}
+
+function createBlock(graph: Graph): number {
+  graph.blocks.push({
+    values: [],
+    jump: {kind: 'Return', value: {index: ~0}},
+    previousLocals: {},
+  });
+  return graph.blocks.length - 1;
+}
+
+interface ValueRef {
+  block: number;
+  ref: InsRef;
+}
+
+function unwrap(graph: Graph, block: number, value: ValueRef): InsRef {
+  // TODO: Generate a "LocalGet" if needed
+}
+
+function addIns(graph: Graph, ins: Ins): ValueRef {
+  // TODO
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
 interface Field {
   name: string;
   typeID: number;
@@ -984,6 +1086,7 @@ interface DefData {
   name: string;
   argTypeIDs: number[];
   retTypeID: number;
+  graph: Graph | null;
 }
 
 type GlobalRef =
@@ -1107,6 +1210,14 @@ function compileTypes(log: Log, module: Module, code: Code): void {
   }
 }
 
+interface DefBuilder {
+}
+
+interface Scope {
+  parent: Scope;
+  locals: {[name: string]: number};
+}
+
 function compileDefs(log: Log, module: Module, code: Code): void {
   // Resolve all argument types and return types
   for (const def of module.defs) {
@@ -1116,7 +1227,7 @@ function compileDefs(log: Log, module: Module, code: Code): void {
         argTypeIDs.push(resolveToTypeID(log, code, arg.type));
       }
       const retTypeID = resolveToTypeID(log, code, def.ret);
-      code.defs.push({name: def.name, argTypeIDs, retTypeID});
+      code.defs.push({name: def.name, argTypeIDs, retTypeID, graph: null});
     }
   }
 }
