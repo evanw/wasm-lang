@@ -980,6 +980,12 @@ interface TypeData {
   defaultVariant: number | null;
 }
 
+interface DefData {
+  name: string;
+  argTypeIDs: number[];
+  retTypeID: number;
+}
+
 type GlobalRef =
   {kind: 'Type', typeID: number} |
   {kind: 'Ctor', typeID: number, index: number} |
@@ -988,6 +994,7 @@ type GlobalRef =
 
 interface Code {
   types: TypeData[];
+  defs: DefData[];
   globalScope: {[name: string]: GlobalRef};
   errorTypeID: number;
 }
@@ -1100,15 +1107,31 @@ function compileTypes(log: Log, module: Module, code: Code): void {
   }
 }
 
+function compileDefs(log: Log, module: Module, code: Code): void {
+  // Resolve all argument types and return types
+  for (const def of module.defs) {
+    if (defineGlobal(log, code, def.nameRange, def.name, {kind: 'Def', defID: code.defs.length})) {
+      const argTypeIDs: number[] = [];
+      for (const arg of def.args) {
+        argTypeIDs.push(resolveToTypeID(log, code, arg.type));
+      }
+      const retTypeID = resolveToTypeID(log, code, def.ret);
+      code.defs.push({name: def.name, argTypeIDs, retTypeID});
+    }
+  }
+}
+
 function compile(log: Log, module: Module): Code {
   const code: Code = {
     types: [],
+    defs: [],
     globalScope: {},
     errorTypeID: 0,
   };
 
   code.errorTypeID = addTypeID(log, code, {start: 0, end: 0}, '(error)');
   compileTypes(log, module, code);
+  compileDefs(log, module, code);
   return code;
 }
 
