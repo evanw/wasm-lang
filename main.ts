@@ -926,7 +926,7 @@ function parse(log: Log, text: string): Module | null {
             const name = currentText(lexer);
             const nameRange = currentRange(lexer);
             if (!expect(lexer, Token.Identifier)) return null;
-            const args: Arg[] | null = lexer.token === Token.Newline ? [] : parseArgs(lexer);
+            const args: Arg[] | null = lexer.token !== Token.OpenParenthesis ? [] : parseArgs(lexer);
             if (args === null) return null;
             ctors.push({range: spanSince(lexer, start), name, nameRange, args});
 
