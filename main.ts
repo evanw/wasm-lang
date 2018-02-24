@@ -302,6 +302,7 @@ interface Module {
 interface VarDecl {
   range: Range;
   name: string;
+  nameRange: Range;
   type: Type;
   value: Expr;
 }
@@ -309,6 +310,7 @@ interface VarDecl {
 interface DefDecl {
   range: Range;
   name: string;
+  nameRange: Range;
   params: Param[];
   args: Arg[];
   ret: Type;
@@ -318,6 +320,7 @@ interface DefDecl {
 interface TypeDecl {
   range: Range;
   name: string;
+  nameRange: Range;
   params: Param[];
   ctors: Ctor[]
 }
@@ -330,12 +333,14 @@ interface Param {
 interface Ctor {
   range: Range;
   name: string;
+  nameRange: Range;
   args: Arg[];
 }
 
 interface Arg {
   range: Range;
   name: string;
+  nameRange: Range;
   isColon: boolean;
   isRef: boolean;
   type: Type;
@@ -722,12 +727,13 @@ function parseArgs(lexer: Lexer): Arg[] | null {
   while (lexer.token !== Token.CloseParenthesis) {
     const start = lexer.start;
     const name = currentText(lexer);
+    const nameRange = currentRange(lexer);
     if (!expect(lexer, Token.Identifier)) return null;
     const isColon = eat(lexer, Token.Colon);
     const isRef = eat(lexer, Token.Ampersand);
     const type = parseType(lexer);
     if (type === null) return null;
-    args.push({range: spanSince(lexer, start), name, isColon, isRef, type});
+    args.push({range: spanSince(lexer, start), name, nameRange, isColon, isRef, type});
     if (!eat(lexer, Token.Comma)) break;
     eat(lexer, Token.Newline);
   }
@@ -860,6 +866,7 @@ function parse(log: Log, text: string): Module | null {
       case Token.Var: {
         advance(lexer);
         const name = currentText(lexer);
+        const nameRange = currentRange(lexer);
         if (!expect(lexer, Token.Identifier)) return null;
         const type: Type | null = lexer.token === Token.Equals
           ? {range: currentRange(lexer), kind: {kind: 'Inferred'}}
@@ -867,13 +874,14 @@ function parse(log: Log, text: string): Module | null {
         if (type === null || !expect(lexer, Token.Equals)) return null;
         const value = parseExpr(lexer, LEVEL_LOWEST);
         if (value === null) return null;
-        vars.push({range: spanSince(lexer, start), name, type, value});
+        vars.push({range: spanSince(lexer, start), name, nameRange, type, value});
         break;
       }
 
       case Token.Def: {
         advance(lexer);
         const name = currentText(lexer);
+        const nameRange = currentRange(lexer);
         if (!expect(lexer, Token.Identifier)) return null;
         const params = parseParams(lexer);
         if (params === null) return null;
@@ -892,7 +900,7 @@ function parse(log: Log, text: string): Module | null {
         if (ret === null) return null;
         const body = parseBlock(lexer);
         if (body === null) return null;
-        defs.push({range: spanSince(lexer, start), name, params, args, ret, body});
+        defs.push({range: spanSince(lexer, start), name, nameRange, params, args, ret, body});
         break;
       }
 
@@ -905,6 +913,7 @@ function parse(log: Log, text: string): Module | null {
         advance(lexer);
         const ctors: Ctor[] = [];
         const name = currentText(lexer);
+        const nameRange = currentRange(lexer);
         if (!expect(lexer, Token.Identifier)) return null;
         const params = parseParams(lexer);
         if (params === null) return null;
@@ -915,10 +924,11 @@ function parse(log: Log, text: string): Module | null {
           while (lexer.token !== Token.CloseBrace) {
             const start = lexer.start;
             const name = currentText(lexer);
+            const nameRange = currentRange(lexer);
             if (!expect(lexer, Token.Identifier)) return null;
             const args: Arg[] | null = lexer.token === Token.Newline ? [] : parseArgs(lexer);
             if (args === null) return null;
-            ctors.push({range: spanSince(lexer, start), name, args});
+            ctors.push({range: spanSince(lexer, start), name, nameRange, args});
 
             // Recover if there's a semicolon or comma after a constructor
             if (lexer.token === Token.Semicolon || lexer.token === Token.Comma) {
@@ -935,10 +945,10 @@ function parse(log: Log, text: string): Module | null {
         else {
           const args: Arg[] | null = lexer.token === Token.Newline ? [] : parseArgs(lexer);
           if (args === null) return null;
-          ctors.push({range: spanSince(lexer, start), name, args});
+          ctors.push({range: spanSince(lexer, start), name, nameRange, args});
         }
 
-        types.push({range: spanSince(lexer, start), name, params, ctors});
+        types.push({range: spanSince(lexer, start), name, nameRange, params, ctors});
         break;
       }
 
@@ -954,16 +964,168 @@ function parse(log: Log, text: string): Module | null {
 
 ////////////////////////////////////////////////////////////////////////////////
 
+interface Field {
+  name: string;
+  typeID: number;
+}
+
+interface Variant {
+  name: string;
+  fields: Field[];
+}
+
+interface TypeData {
+  name: string;
+  variants: Variant[];
+  defaultVariant: number | null;
+}
+
+type GlobalRef =
+  {kind: 'Type', typeID: number} |
+  {kind: 'Ctor', typeID: number, index: number} |
+  {kind: 'Def', defID: number} |
+  {kind: 'Var', varID: number};
+
+interface Code {
+  types: TypeData[];
+  globalScope: {[name: string]: GlobalRef};
+  errorTypeID: number;
+}
+
+function defineGlobal(log: Log, code: Code, range: Range, name: string, ref: GlobalRef): boolean {
+  if (name in code.globalScope) {
+    appendToLog(log, range, `The name "${name}" is already used`);
+    return false;
+  }
+
+  code.globalScope[name] = ref;
+  return true;
+}
+
+function addTypeID(log: Log, code: Code, range: Range, name: string): number {
+  const typeID = code.types.length;
+  if (!defineGlobal(log, code, range, name, {kind: 'Type', typeID})) {
+    return code.errorTypeID;
+  }
+
+  code.types.push({name, variants: [], defaultVariant: null});
+  return typeID;
+}
+
+function resolveToTypeID(log: Log, code: Code, type: Type): number {
+  if (type.kind.kind === 'Name') {
+    const name = type.kind.name;
+    const ref = code.globalScope[name];
+
+    if (!ref) {
+      appendToLog(log, type.range, `There is no type named "${name}"`);
+      return code.errorTypeID;
+    }
+
+    if (ref.kind === 'Ctor') {
+      const typeName = code.types[ref.typeID].name;
+      appendToLog(log, type.range, `Use the type "${typeName}" instead of the constructor "${name}"`);
+      return code.errorTypeID;
+    }
+
+    if (ref.kind !== 'Type') {
+      appendToLog(log, type.range, `The name "${name}" is not a type`);
+      return code.errorTypeID;
+    }
+
+    return ref.typeID;
+  }
+
+  else {
+    appendToLog(log, type.range, `Unsupported type of kind ${type.kind.kind}`);
+  }
+
+  return code.errorTypeID;
+}
+
+function compileTypes(log: Log, module: Module, code: Code): void {
+  // Add type names first
+  for (const type of module.types) {
+    if (type.params.length === 0) {
+      const typeID = addTypeID(log, code, type.nameRange, type.name);
+      const data = code.types[typeID];
+
+      // Also add variants
+      for (const ctor of type.ctors) {
+        const index = data.variants.length;
+
+        // Allow one variant to share the name of the type
+        if (ctor.name === type.name && data.defaultVariant === null) {
+          data.defaultVariant = data.variants.length;
+          data.variants.push({name: ctor.name, fields: []});
+        }
+
+        // Otherwise the variant must have a unique global name
+        else if (defineGlobal(log, code, ctor.nameRange, ctor.name, {kind: 'Ctor', typeID, index})) {
+          data.variants.push({name: ctor.name, fields: []});
+        }
+      }
+    }
+  }
+
+  // Add fields next
+  for (const type of module.types) {
+    if (type.params.length === 0) {
+      let foundDefault = false;
+
+      // Turn each constructor into a variant
+      for (const ctor of type.ctors) {
+        let ref = code.globalScope[ctor.name];
+
+        // Allow one variant to share the name of the type
+        if (ref.kind === 'Type' && ctor.name === type.name && !foundDefault) {
+          const data = code.types[ref.typeID];
+          if (data.defaultVariant !== null) {
+            foundDefault = true;
+            ref = {kind: 'Ctor', typeID: ref.typeID, index: data.defaultVariant};
+          }
+        }
+
+        // The ref can be null if there are two variants with the type's name (only the first one is the default)
+        if (!ref || ref.kind !== 'Ctor') continue;
+        const fields = code.types[ref.typeID].variants[ref.index].fields;
+
+        // Turn constructor arguments into fields
+        for (const arg of ctor.args) {
+          const typeID = resolveToTypeID(log, code, arg.type);
+          fields.push({name: arg.name, typeID});
+        }
+      }
+    }
+  }
+}
+
+function compile(log: Log, module: Module): Code {
+  const code: Code = {
+    types: [],
+    globalScope: {},
+    errorTypeID: 0,
+  };
+
+  code.errorTypeID = addTypeID(log, code, {start: 0, end: 0}, '(error)');
+  compileTypes(log, module, code);
+  return code;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
 export function main(): void {
   const fs = require('fs');
   const source = fs.readFileSync('example.txt', 'utf8');
   const log: Log = {messages: []};
-  const tree = parse(log, source);
+  const module = parse(log, source);
+  const code = module && compile(log, module);
 
   console.log(logToString(source, log));
   if (log.messages.length === 0) {
-    console.log(require('util').inspect(tree, {depth: Infinity}));
+    // console.log(require('util').inspect(module, {depth: Infinity}));
   }
+  console.log('done');
 }
 
 main();
