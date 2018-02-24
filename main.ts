@@ -294,19 +294,33 @@ function advance(lexer: Lexer): void {
 ////////////////////////////////////////////////////////////////////////////////
 
 interface Module {
-  decls: Decl[];
+  vars: VarDecl[];
+  defs: DefDecl[];
+  types: TypeDecl[];
 }
 
-interface Decl {
+interface VarDecl {
   range: Range;
   name: string;
-  kind: DeclKind;
+  type: Type;
+  value: Expr;
 }
 
-type DeclKind =
-  {kind: 'Var', type: Type, value: Expr} |
-  {kind: 'Type', params: Param[], ctors: Ctor[]} |
-  {kind: 'Def', params: Param[], args: Arg[], ret: Type, body: Stmt[]};
+interface DefDecl {
+  range: Range;
+  name: string;
+  params: Param[];
+  args: Arg[];
+  ret: Type;
+  body: Stmt[]
+}
+
+interface TypeDecl {
+  range: Range;
+  name: string;
+  params: Param[];
+  ctors: Ctor[]
+}
 
 interface Param {
   range: Range;
@@ -831,7 +845,9 @@ function parseParams(lexer: Lexer): Param[] | null {
 
 function parse(log: Log, text: string): Module | null {
   const lexer = createLexer(log, text);
-  const decls: Decl[] = [];
+  const vars: VarDecl[] = [];
+  const defs: DefDecl[] = [];
+  const types: TypeDecl[] = [];
 
   while (lexer.token !== Token.EndOfFile) {
     const start = lexer.start;
@@ -851,7 +867,7 @@ function parse(log: Log, text: string): Module | null {
         if (type === null || !expect(lexer, Token.Equals)) return null;
         const value = parseExpr(lexer, LEVEL_LOWEST);
         if (value === null) return null;
-        decls.push({range: spanSince(lexer, start), name, kind: {kind: 'Var', type, value}});
+        vars.push({range: spanSince(lexer, start), name, type, value});
         break;
       }
 
@@ -876,7 +892,7 @@ function parse(log: Log, text: string): Module | null {
         if (ret === null) return null;
         const body = parseBlock(lexer);
         if (body === null) return null;
-        decls.push({range: spanSince(lexer, start), name, kind: {kind: 'Def', params, args, ret, body}});
+        defs.push({range: spanSince(lexer, start), name, params, args, ret, body});
         break;
       }
 
@@ -922,7 +938,7 @@ function parse(log: Log, text: string): Module | null {
           ctors.push({range: spanSince(lexer, start), name, args});
         }
 
-        decls.push({range: spanSince(lexer, start), name, kind: {kind: 'Type', params, ctors}});
+        types.push({range: spanSince(lexer, start), name, params, ctors});
         break;
       }
 
@@ -933,7 +949,7 @@ function parse(log: Log, text: string): Module | null {
     }
   }
 
-  return {decls};
+  return {vars, defs, types};
 }
 
 ////////////////////////////////////////////////////////////////////////////////
