@@ -233,6 +233,7 @@ function compileStmts(context: Context, stmts: Stmt[], graph: Graph, parent: Sco
         let typeID: TypeID;
         let initial: Result;
 
+        // Inferred type
         if (type.kind.kind === 'Inferred') {
           initial = compileExpr(context, value, graph, scope, null);
           typeID = initial.typeID;
@@ -244,6 +245,7 @@ function compileStmts(context: Context, stmts: Stmt[], graph: Graph, parent: Sco
           }
         }
 
+        // Explicit type
         else {
           typeID = resolveTypeExpr(context, type);
           initial = compileExpr(context, value, graph, scope, typeID);
@@ -255,14 +257,33 @@ function compileStmts(context: Context, stmts: Stmt[], graph: Graph, parent: Sco
       }
 
       case 'Return': {
+        // Return a value
         if (stmt.kind.value !== null) {
-          const value = compileExpr(context, stmt.kind.value, graph, scope, retTypeID);
+          if (retTypeID === context.voidTypeID) {
+            appendToLog(context.log, stmt.kind.value.range, `Unexpected return value in a function without a return type`);
+          } else {
+            const result = compileExpr(context, stmt.kind.value, graph, scope, retTypeID);
+            setJump(graph, context.currentBlock, {kind: 'Return', value: result.value.ref});
+            context.currentBlock = createBlock(graph);
+          }
+        }
+
+        // Return nothing
+        else {
+          if (retTypeID !== context.voidTypeID) {
+            appendToLog(context.log, stmt.range, `Must return a value of type "${context.types[retTypeID.index].name}"`);
+          } else {
+            setJump(graph, context.currentBlock, {kind: 'ReturnVoid'});
+            context.currentBlock = createBlock(graph);
+          }
         }
         break;
       }
 
       case 'Break': {
         const count = stmt.kind.count;
+
+        // The parser handles out-of-bounds error reporting
         if (count >= 1 && count <= context.loops.length) {
           const after = createBlock(graph);
           setJump(graph, context.currentBlock, {kind: 'Goto', target: context.loops[count - 1].breakTarget});
@@ -273,6 +294,8 @@ function compileStmts(context: Context, stmts: Stmt[], graph: Graph, parent: Sco
 
       case 'Continue': {
         const count = stmt.kind.count;
+
+        // The parser handles out-of-bounds error reporting
         if (count >= 1 && count <= context.loops.length) {
           const after = createBlock(graph);
           setJump(graph, context.currentBlock, {kind: 'Goto', target: context.loops[count - 1].continueTarget});

@@ -49,6 +49,8 @@ export type Ins =
   {kind: 'Div32U', left: InsRef, right: InsRef};
 
 export type Jump =
+  {kind: 'Missing'} |
+  {kind: 'ReturnVoid'} |
   {kind: 'Goto', target: number} |
   {kind: 'Return', value: InsRef} |
   {kind: 'Branch', value: InsRef, yes: number, no: number};
@@ -117,7 +119,7 @@ export function createGraph(ptrType: RawType): Graph {
 export function createBlock(graph: Graph): number {
   graph.blocks.push({
     insList: [],
-    jump: {kind: 'Return', value: {index: ~0}},
+    jump: {kind: 'Missing'},
     previousLocals: {},
     spills: {},
   });
