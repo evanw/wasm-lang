@@ -136,6 +136,12 @@ export function createLocal(graph: Graph, type: RawType): number {
   return graph.locals.length - 1;
 }
 
+export function createConstant(graph: Graph, value: number): ValueRef {
+  if (value === 0) return {block: -1, ref: {index: -1}};
+  graph.constants.push(value);
+  return {block: -1, ref: {index: -graph.constants.length}};
+}
+
 export function unwrapRef(graph: Graph, block: number, value: ValueRef): InsRef {
   if (value.block === block || value.block < 0) return value.ref;
   const local = spillToLocal(graph, value.block, value.ref);

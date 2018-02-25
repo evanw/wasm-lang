@@ -1,6 +1,11 @@
 {
   "compilerOptions": {
     "target": "es5",
+    "noUnusedLocals": false,
+    "noUnusedParameters": true,
+    "allowUnusedLabels": false,
+    "allowUnreachableCode": false,
+    "noFallthroughCasesInSwitch": true,
     "strict": true
   }
 }

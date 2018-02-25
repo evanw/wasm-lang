@@ -1,15 +1,21 @@
 import { Log, Range, appendToLog } from './log';
-import { Parsed, TypeExpr, TypeDecl, CtorDecl } from './parser';
-import { Code, Graph, RawType } from './ssa';
+import { Parsed, TypeExpr, CtorDecl, DefDecl, Stmt, Expr } from './parser';
+import { Graph, RawType, createGraph, createLocal, ValueRef, createConstant, addLocalGet, Code, createBlock } from './ssa';
 
-interface Field {
+interface TypeID {
+  index: number;
+}
+
+interface ArgData {
+  typeID: TypeID;
   name: string;
-  typeID: number;
+  isKey: boolean;
+  isRef: boolean;
 }
 
 interface CtorData {
   name: string;
-  fields: Field[];
+  args: ArgData[];
 }
 
 interface TypeData {
@@ -20,28 +26,37 @@ interface TypeData {
 
 interface DefData {
   name: string;
-  argTypeIDs: number[];
-  retTypeID: number;
+  args: ArgData[];
+  retTypeID: TypeID;
   graph: Graph | null;
 }
 
 type GlobalRef =
-  {kind: 'Type', typeID: number} |
-  {kind: 'Ctor', typeID: number, index: number} |
+  {kind: 'Type', typeID: TypeID} |
+  {kind: 'Ctor', typeID: TypeID, index: number} |
   {kind: 'Def', defID: number} |
   {kind: 'Var', varID: number};
 
 interface Context {
+  code: Code;
+  log: Log;
   ptrType: RawType;
   types: TypeData[];
   defs: DefData[];
   globalScope: {[name: string]: GlobalRef};
-  errorTypeID: number;
+  currentBlock: number;
+
+  // Built-in types
+  errorTypeID: TypeID;
+  voidTypeID: TypeID;
+  boolTypeID: TypeID;
+  intTypeID: TypeID;
+  stringTypeID: TypeID;
 }
 
-function defineGlobal(log: Log, context: Context, range: Range, name: string, ref: GlobalRef): boolean {
+function defineGlobal(context: Context, range: Range, name: string, ref: GlobalRef): boolean {
   if (name in context.globalScope) {
-    appendToLog(log, range, `The name "${name}" is already used`);
+    appendToLog(context.log, range, `The name "${name}" is already used`);
     return false;
   }
 
@@ -49,9 +64,9 @@ function defineGlobal(log: Log, context: Context, range: Range, name: string, re
   return true;
 }
 
-function addTypeID(log: Log, context: Context, range: Range, name: string): number {
-  const typeID = context.types.length;
-  if (!defineGlobal(log, context, range, name, {kind: 'Type', typeID})) {
+function addTypeID(context: Context, range: Range, name: string): TypeID {
+  const typeID: TypeID = {index: context.types.length};
+  if (!defineGlobal(context, range, name, {kind: 'Type', typeID})) {
     return context.errorTypeID;
   }
 
@@ -59,46 +74,53 @@ function addTypeID(log: Log, context: Context, range: Range, name: string): numb
   return typeID;
 }
 
-function resolveToTypeID(log: Log, context: Context, type: TypeExpr): number {
-  // Only support simple type names for now
-  if (type.kind.kind !== 'Name') {
-    appendToLog(log, type.range, `Unsupported type of kind ${type.kind.kind}`);
-    return context.errorTypeID;
-  }
+function resolveTypeExpr(context: Context, type: TypeExpr): TypeID {
+  switch (type.kind.kind) {
+    case 'Void':
+      return context.voidTypeID;
 
-  const name = type.kind.name;
+    case 'Name':
+      return resolveTypeName(context, type.range, type.kind.name);
+
+    default:
+      appendToLog(context.log, type.range, `Unsupported type of kind "${type.kind.kind}"`);
+      return context.errorTypeID;
+  }
+}
+
+function resolveTypeName(context: Context, range: Range, name: string): TypeID {
   const ref = context.globalScope[name];
 
   // Check that the name exists
   if (!ref) {
-    appendToLog(log, type.range, `There is no type named "${name}"`);
+    appendToLog(context.log, range, `There is no type named "${name}"`);
     return context.errorTypeID;
   }
 
   // People might try to use a constructor as a type
   if (ref.kind === 'Ctor') {
-    const typeName = context.types[ref.typeID].name;
-    appendToLog(log, type.range, `Use the type "${typeName}" instead of the constructor "${name}"`);
+    const typeName = context.types[ref.typeID.index].name;
+    appendToLog(context.log, range, `Use the type "${typeName}" instead of the constructor "${name}"`);
     return context.errorTypeID;
   }
 
   // The name must refer to a type
   if (ref.kind !== 'Type') {
-    appendToLog(log, type.range, `The name "${name}" is not a type`);
+    appendToLog(context.log, range, `The name "${name}" is not a type`);
     return context.errorTypeID;
   }
 
   return ref.typeID;
 }
 
-function compileTypes(log: Log, parsed: Parsed, context: Context): void {
-  const list: [number, TypeDecl, CtorDecl[]][] = [];
+function compileTypes(context: Context, parsed: Parsed): void {
+  const list: [TypeID, CtorDecl[]][] = [];
 
   // Add type names first
   for (const decl of parsed.types) {
     if (decl.params.length === 0) {
-      const typeID = addTypeID(log, context, decl.nameRange, decl.name);
-      const data = context.types[typeID];
+      const typeID = addTypeID(context, decl.nameRange, decl.name);
+      const data = context.types[typeID.index];
       const ctors: CtorDecl[] = [];
 
       // Also add constructors
@@ -108,49 +130,390 @@ function compileTypes(log: Log, parsed: Parsed, context: Context): void {
         // Allow one constructor to share the name of the type
         if (ctor.name === decl.name && data.defaultCtor === null) {
           data.defaultCtor = data.ctors.length;
-          data.ctors.push({name: ctor.name, fields: []});
+          data.ctors.push({name: ctor.name, args: []});
           ctors.push(ctor);
         }
 
         // Otherwise the constructor must have a unique global name
-        else if (defineGlobal(log, context, ctor.nameRange, ctor.name, {kind: 'Ctor', typeID, index})) {
-          data.ctors.push({name: ctor.name, fields: []});
+        else if (defineGlobal(context, ctor.nameRange, ctor.name, {kind: 'Ctor', typeID, index})) {
+          data.ctors.push({name: ctor.name, args: []});
           ctors.push(ctor);
         }
       }
 
-      list.push([typeID, decl, ctors]);
+      list.push([typeID, ctors]);
     }
   }
 
+  // Bind built-in types
+  context.boolTypeID = resolveTypeName(context, {start: 0, end: 0}, 'bool');
+  context.intTypeID = resolveTypeName(context, {start: 0, end: 0}, 'int');
+  context.stringTypeID = resolveTypeName(context, {start: 0, end: 0}, 'string');
+
   // Add fields next
-  for (const [typeID, type, ctors] of list) {
-    const data = context.types[typeID];
+  for (const [typeID, ctors] of list) {
+    const data = context.types[typeID.index];
 
     // Resolve field types now that all types have been defined
     for (let j = 0; j < ctors.length; j++) {
       const ctor = ctors[j];
-      const fields = data.ctors[j].fields;
+      const args = data.ctors[j].args;
 
       // Turn constructor arguments into fields
       for (const arg of ctor.args) {
-        const typeID = resolveToTypeID(log, context, arg.type);
-        fields.push({name: arg.name, typeID});
+        const typeID = resolveTypeExpr(context, arg.type);
+        args.push({typeID, name: arg.name, isKey: arg.isKey, isRef: arg.isRef});
       }
     }
   }
 }
 
-export function compile(log: Log, parsed: Parsed, ptrType: RawType): Context {
+interface Local {
+  typeID: TypeID;
+  index: number;
+}
+
+interface Scope {
+  parent: Scope | null;
+  locals: {[name: string]: Local};
+}
+
+function compileDefs(context: Context, parsed: Parsed): void {
+  const list: [number, DefDecl][] = [];
+
+  // Resolve all argument types and return types
+  for (const def of parsed.defs) {
+    if (defineGlobal(context, def.nameRange, def.name, {kind: 'Def', defID: context.defs.length})) {
+      const args: ArgData[] = [];
+      for (const arg of def.args) {
+        const typeID = resolveTypeExpr(context, arg.type);
+        args.push({typeID, name: arg.name, isKey: arg.isKey, isRef: arg.isRef});
+      }
+      const retTypeID = resolveTypeExpr(context, def.ret);
+      list.push([context.defs.length, def]);
+      context.defs.push({name: def.name, args, retTypeID, graph: null});
+    }
+  }
+
+  // Compile each function
+  for (const [defID, def] of list) {
+    const data = context.defs[defID];
+    const graph = createGraph(context.ptrType);
+    const scope: Scope = {parent: null, locals: {}};
+
+    // Add a local variable for each argument
+    for (let i = 0; i < def.args.length; i++) {
+      const arg = def.args[i];
+      defineLocal(context, graph, scope, arg.name, arg.nameRange, data.args[i].typeID);
+    }
+
+    // Compile the body
+    context.currentBlock = createBlock(graph);
+    compileStmts(context, def.body, graph, scope, data.retTypeID);
+    data.graph = graph;
+  }
+}
+
+function compileStmts(context: Context, stmts: Stmt[], graph: Graph, scope: Scope, retTypeID: TypeID): void {
+  for (const stmt of stmts) {
+    switch (stmt.kind.kind) {
+      case 'Var': {
+        const typeID = resolveTypeExpr(context, stmt.kind.type);
+        const value = compileExpr(context, stmt.kind.value, graph, scope, typeID);
+        break;
+      }
+
+      case 'Return': {
+        if (stmt.kind.value !== null) {
+          const value = compileExpr(context, stmt.kind.value, graph, scope, retTypeID);
+        }
+        break;
+      }
+
+      case 'If': {
+        const test = compileExpr(context, stmt.kind.test, graph, scope, context.boolTypeID);
+        compileStmts(context, stmt.kind.yes, graph, scope, retTypeID);
+        compileStmts(context, stmt.kind.no, graph, scope, retTypeID);
+        break;
+      }
+
+      case 'While': {
+        const test = compileExpr(context, stmt.kind.test, graph, scope, context.boolTypeID);
+        compileStmts(context, stmt.kind.body, graph, scope, retTypeID);
+        break;
+      }
+
+      case 'Assign': {
+        const value = compileExpr(context, stmt.kind.value, graph, scope, context.errorTypeID);
+        break;
+      }
+
+      case 'Expr':
+        compileExpr(context, stmt.kind.value, graph, scope, context.errorTypeID);
+        break;
+
+      default: {
+        const checkCovered: void = stmt.kind;
+        throw new Error('Internal error');
+      }
+    }
+  }
+}
+
+interface Result {
+  typeID: TypeID;
+  value: ValueRef;
+}
+
+function errorResult(context: Context, graph: Graph): Result {
+  return {typeID: context.errorTypeID, value: createConstant(graph, 0)};
+}
+
+function compileArgs(context: Context, range: Range, exprs: Expr[], graph: Graph, scope: Scope, args: ArgData[]): Result[] {
+  const results: Result[] = [];
+
+  if (exprs.length !== args.length) {
+    const expected = args.length === 1 ? '' : 's';
+    const found = exprs.length === 1 ? '' : 's';
+    appendToLog(context.log, range, `Expected ${args.length} argument${expected} but found ${exprs.length} argument${found}`);
+
+    for (let i = 0; i < args.length; i++) {
+      results.push(errorResult(context, graph));
+    }
+  }
+
+  else {
+    for (let i = 0; i < args.length; i++) {
+      let expr = exprs[i];
+      const arg = args[i];
+
+      results.push(compileExpr(context, expr, graph, scope, arg.typeID));
+
+      if (arg.isKey) {
+        if (expr.kind.kind !== 'Key') {
+          appendToLog(context.log, expr.range, `Expected keyword "${arg.name}:" before argument`);
+        } else if (expr.kind.name !== arg.name) {
+          appendToLog(context.log, expr.kind.nameRange, `Expected "${arg.name}:" but found "${expr.kind.name}:"`);
+        }
+      }
+
+      else if (expr.kind.kind === 'Key') {
+        if (expr.kind.name === arg.name) {
+          appendToLog(context.log, expr.kind.nameRange, `Argument "${arg.name}" is not a keyword argument`);
+        } else {
+          appendToLog(context.log, expr.kind.nameRange, `Unexpected keyword "${expr.kind.name}:" for argument "${arg.name}"`);
+        }
+      }
+    }
+  }
+
+  return results;
+}
+
+function compileExpr(context: Context, expr: Expr, graph: Graph, scope: Scope, castTo: TypeID): Result {
+  let result = errorResult(context, graph);
+
+  switch (expr.kind.kind) {
+    case 'Ref':
+      result = compileExpr(context, expr.kind.value, graph, scope, castTo);
+      break;
+
+    case 'Key':
+      result = compileExpr(context, expr.kind.value, graph, scope, castTo);
+      break;
+
+    case 'Bool':
+      result = {
+        typeID: context.boolTypeID,
+        value: createConstant(graph, expr.kind.value ? 1 : 0),
+      };
+      break;
+
+    case 'Int':
+      result = {
+        typeID: context.intTypeID,
+        value: createConstant(graph, expr.kind.value),
+      };
+      break;
+
+    case 'String':
+      result = {
+        typeID: context.stringTypeID,
+        value: createConstant(graph, 0),
+      };
+      break;
+
+    case 'Name': {
+      const name = expr.kind.value;
+
+      // Check for a local first
+      const local = findLocal(scope, name);
+      if (local !== null) {
+        result = {
+          typeID: local.typeID,
+          value: addLocalGet(graph, context.currentBlock, local.index),
+        };
+        break;
+      }
+
+      // Check for a global next
+      let global = context.globalScope[name];
+      if (global) {
+        global = forwardToDefaultCtor(context, global);
+        if (global.kind === 'Ctor') {
+          const ctor = context.types[global.typeID.index].ctors[global.index];
+          const args = compileArgs(context, expr.range, [], graph, scope, ctor.args);
+          result = {
+            typeID: global.typeID,
+            value: createConstant(graph, 0),
+          };
+        } else {
+          appendToLog(context.log, expr.range, `Cannot use "${name}" as a value here`);
+        }
+        break;
+      }
+
+      appendToLog(context.log, expr.range, `There is no symbol named "${name}" here`);
+      break;
+    }
+
+    case 'Array':
+      break;
+
+    case 'Unary':
+      break;
+
+    case 'Binary':
+      break;
+
+    case 'Call': {
+      const name = expr.kind.name;
+
+      // Check for a local first
+      if (findLocal(scope, name) !== null) {
+        appendToLog(context.log, expr.kind.nameRange, `Cannot call local variable "${name}"`);
+        break;
+      }
+
+      // Check for a global next
+      let global = context.globalScope[name];
+      if (!global) {
+        appendToLog(context.log, expr.kind.nameRange, `There is no symbol named "${name}" here`);
+        break;
+      }
+
+      // Check for a constructor
+      global = forwardToDefaultCtor(context, global);
+      if (global.kind === 'Ctor') {
+        const ctor = context.types[global.typeID.index].ctors[global.index];
+        const args = compileArgs(context, expr.range, expr.kind.args, graph, scope, ctor.args);
+        result = {
+          typeID: global.typeID,
+          value: createConstant(graph, 0),
+        };
+      }
+
+      // Check for a function
+      else if (global.kind === 'Def') {
+        const def = context.defs[global.defID];
+        const args = compileArgs(context, expr.range, expr.kind.args, graph, scope, def.args);
+        result = {
+          typeID: def.retTypeID,
+          value: createConstant(graph, 0),
+        };
+      }
+
+      else {
+        appendToLog(context.log, expr.range, `Cannot use "${name}" as a value here`);
+      }
+      break;
+    }
+
+    case 'Dot':
+      break;
+
+    case 'Index':
+      break;
+
+    default: {
+      const checkCovered: void = expr.kind;
+      throw new Error('Internal error');
+    }
+  }
+
+  return cast(context, expr.range, result, castTo, graph);
+}
+
+function forwardToDefaultCtor(context: Context, global: GlobalRef): GlobalRef {
+  if (global.kind === 'Type') {
+    const type = context.types[global.typeID.index];
+    if (type.defaultCtor !== null) {
+      return {kind: 'Ctor', typeID: global.typeID, index: type.defaultCtor};
+    }
+  }
+  return global;
+}
+
+function cast(context: Context, range: Range, result: Result, to: TypeID, graph: Graph): Result {
+  if (result.typeID === context.errorTypeID || to === context.errorTypeID) {
+    return errorResult(context, graph);
+  }
+
+  if (result.typeID !== to) {
+    const expected = context.types[to.index].name;
+    const found = context.types[result.typeID.index].name;
+    appendToLog(context.log, range, `Expected type "${expected}" but found type "${found}"`);
+    return errorResult(context, graph);
+  }
+
+  return result;
+}
+
+function findLocal(scope: Scope, name: string): Local | null {
+  if (name in scope.locals) {
+    return scope.locals[name];
+  }
+
+  if (scope.parent !== null) {
+    return findLocal(scope.parent, name);
+  }
+
+  return null;
+}
+
+function defineLocal(context: Context, graph: Graph, scope: Scope, name: string, range: Range, typeID: TypeID): number {
+  const local = findLocal(scope, name);
+  if (local !== null) {
+    appendToLog(context.log, range, `The name "${name}" is already used`);
+    return local.index;
+  }
+
+  const index = createLocal(graph, RawType.I32);
+  scope.locals[name] = {typeID, index};
+  return index;
+}
+
+export function compile(log: Log, parsed: Parsed, ptrType: RawType): Code {
   const context: Context = {
+    code: {funcs: [], globals: []},
+    log,
     ptrType,
     types: [],
     defs: [],
     globalScope: {},
-    errorTypeID: 0,
+    currentBlock: -1,
+
+    // Built-in types
+    errorTypeID: {index: 0},
+    voidTypeID: {index: 0},
+    boolTypeID: {index: 0},
+    intTypeID: {index: 0},
+    stringTypeID: {index: 0},
   };
 
-  context.errorTypeID = addTypeID(log, context, {start: 0, end: 0}, '(error)');
-  compileTypes(log, parsed, context);
-  return context;
+  context.errorTypeID = addTypeID(context, {start: 0, end: 0}, '(error)');
+  context.voidTypeID = addTypeID(context, {start: 0, end: 0}, '(void)');
+  compileTypes(context, parsed);
+  compileDefs(context, parsed);
+  return context.code;
 }

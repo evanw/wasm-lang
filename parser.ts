@@ -49,7 +49,7 @@ export interface ArgDecl {
   range: Range;
   name: string;
   nameRange: Range;
-  isColon: boolean;
+  isKey: boolean;
   isRef: boolean;
   type: TypeExpr;
 }
@@ -98,11 +98,11 @@ export type ExprKind =
   {kind: 'Name', value: string} |
   {kind: 'String', value: string} |
   {kind: 'Ref', value: Expr} |
-  {kind: 'Key', name: string, value: Expr} |
+  {kind: 'Key', name: string, nameRange: Range, value: Expr} |
   {kind: 'Array', values: Expr[]} |
   {kind: 'Unary', op: UnOp, value: Expr} |
   {kind: 'Binary', op: BinOp, left: Expr, right: Expr} |
-  {kind: 'Call', target: Expr, args: Expr[]} |
+  {kind: 'Call', name: string, nameRange: Range, args: Expr[]} |
   {kind: 'Dot', target: Expr, name: string} |
   {kind: 'Index', target: Expr, value: Expr};
 
@@ -403,12 +403,13 @@ function parseExpr(lexer: Lexer, level: number): Expr | null {
           if (isRef) value = {range: spanSince(lexer, start), kind: {kind: 'Ref', value}};
           else if (isMaybeKey && value.kind.kind === 'Name' && eat(lexer, Token.Colon)) {
             const name = value.kind.value;
+            const nameRange = spanSince(lexer, value.range.start);
             const start2 = lexer.start;
             const isRef2 = eat(lexer, Token.Ampersand);
             value = parseExpr(lexer, LEVEL_LOWEST);
             if (value === null) return null;
             if (isRef2) value = {range: spanSince(lexer, start2), kind: {kind: 'Ref', value}};
-            value = {range: spanSince(lexer, start), kind: {kind: 'Key', name, value}};
+            value = {range: spanSince(lexer, start), kind: {kind: 'Key', name, nameRange, value}};
           }
           args.push(value);
           if (!eat(lexer, Token.Comma)) break;
@@ -417,7 +418,11 @@ function parseExpr(lexer: Lexer, level: number): Expr | null {
 
         eat(lexer, Token.Newline);
         if (!expect(lexer, Token.CloseParenthesis)) return null;
-        left = {range: spanSince(lexer, start), kind: {kind: 'Call', target: left, args}};
+        if (left.kind.kind === 'Name') {
+          left = {range: spanSince(lexer, start), kind: {kind: 'Call', name: left.kind.value, nameRange: left.range, args}};
+        } else {
+          appendToLog(lexer.log, left.range, 'Expected a function name');
+        }
         break;
       }
 
@@ -437,11 +442,11 @@ function parseArgs(lexer: Lexer): ArgDecl[] | null {
     const name = currentText(lexer);
     const nameRange = currentRange(lexer);
     if (!expect(lexer, Token.Identifier)) return null;
-    const isColon = eat(lexer, Token.Colon);
+    const isKey = eat(lexer, Token.Colon);
     const isRef = eat(lexer, Token.Ampersand);
     const type = parseType(lexer);
     if (type === null) return null;
-    args.push({range: spanSince(lexer, start), name, nameRange, isColon, isRef, type});
+    args.push({range: spanSince(lexer, start), name, nameRange, isKey, isRef, type});
     if (!eat(lexer, Token.Comma)) break;
     eat(lexer, Token.Newline);
   }
@@ -451,7 +456,7 @@ function parseArgs(lexer: Lexer): ArgDecl[] | null {
   return args;
 }
 
-function parseBlock(lexer: Lexer): Stmt[] | null {
+function parseStmts(lexer: Lexer): Stmt[] | null {
   const stmts: Stmt[] = [];
   if (!expect(lexer, Token.OpenBrace)) return null;
   eat(lexer, Token.Newline);
@@ -490,7 +495,7 @@ function parseBlock(lexer: Lexer): Stmt[] | null {
         advance(lexer);
         const test = parseExpr(lexer, LEVEL_LOWEST);
         if (test === null) return null;
-        const body = parseBlock(lexer);
+        const body = parseStmts(lexer);
         if (body === null) return null;
         stmts.push({range: spanSince(lexer, start), kind: {kind: 'While', test, body}});
         break;
@@ -500,9 +505,9 @@ function parseBlock(lexer: Lexer): Stmt[] | null {
         advance(lexer);
         const test = parseExpr(lexer, LEVEL_LOWEST);
         if (test === null) return null;
-        const yes = parseBlock(lexer);
+        const yes = parseStmts(lexer);
         if (yes === null) return null;
-        const no = eat(lexer, Token.Else) ? parseBlock(lexer) : [];
+        const no = eat(lexer, Token.Else) ? parseStmts(lexer) : [];
         if (no === null) return null;
         stmts.push({range: spanSince(lexer, start), kind: {kind: 'If', test, yes, no}});
         break;
@@ -606,7 +611,7 @@ export function parse(log: Log, text: string): Parsed | null {
           ? {range: currentRange(lexer), kind: {kind: 'Void'}}
           : parseType(lexer);
         if (ret === null) return null;
-        const body = parseBlock(lexer);
+        const body = parseStmts(lexer);
         if (body === null) return null;
         defs.push({range: spanSince(lexer, start), name, nameRange, params, args, ret, body});
         break;
