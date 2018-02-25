@@ -222,7 +222,6 @@ function compileStmts(context: Context, stmts: Stmt[], graph: Graph, scope: Scop
         const value = stmt.kind.value;
         let typeID: TypeID;
         let initial: Result;
-        let local: number;
 
         if (type.kind.kind === 'Inferred') {
           initial = compileExpr(context, value, graph, scope, null);
@@ -230,7 +229,7 @@ function compileStmts(context: Context, stmts: Stmt[], graph: Graph, scope: Scop
 
           // Forbid creating variables of certain types
           if (typeID === context.voidTypeID) {
-            appendToLog(context.log, stmt.range, `Cannot create a variable of type "${context.types[typeID.index].name}"`);
+            appendToLog(context.log, stmt.kind.nameRange, `Cannot create a variable of type "${context.types[typeID.index].name}"`);
             typeID = context.errorTypeID;
           }
         }
@@ -240,7 +239,7 @@ function compileStmts(context: Context, stmts: Stmt[], graph: Graph, scope: Scop
           initial = compileExpr(context, value, graph, scope, typeID);
         }
 
-        local = defineLocal(context, graph, scope, stmt.kind.name, stmt.range, typeID);
+        const local = defineLocal(context, graph, scope, stmt.kind.name, stmt.range, typeID);
         addLocalSet(graph, context.currentBlock, local, initial.value);
         break;
       }
@@ -309,23 +308,52 @@ function compileArgs(context: Context, range: Range, exprs: Expr[], graph: Graph
       let expr = exprs[i];
       const arg = args[i];
 
-      results.push(compileExpr(context, expr, graph, scope, arg.typeID));
-
+      // Check for an expected key
       if (arg.isKey) {
         if (expr.kind.kind !== 'Key') {
-          appendToLog(context.log, expr.range, `Expected keyword "${arg.name}:" before argument`);
+          appendToLog(context.log, expr.range, `Expected the keyword "${arg.name}:" before this argument`);
         } else if (expr.kind.name !== arg.name) {
           appendToLog(context.log, expr.kind.nameRange, `Expected "${arg.name}:" but found "${expr.kind.name}:"`);
         }
       }
 
+      // Check for an unexpected key
       else if (expr.kind.kind === 'Key') {
         if (expr.kind.name === arg.name) {
-          appendToLog(context.log, expr.kind.nameRange, `Argument "${arg.name}" is not a keyword argument`);
+          appendToLog(context.log, expr.kind.nameRange, `The argument "${arg.name}" is not a keyword argument`);
         } else {
-          appendToLog(context.log, expr.kind.nameRange, `Unexpected keyword "${expr.kind.name}:" for argument "${arg.name}"`);
+          appendToLog(context.log, expr.kind.nameRange, `Unexpected keyword "${expr.kind.name}:" before this argument`);
         }
       }
+
+      // Unwrap the key if there is one
+      if (expr.kind.kind === 'Key') {
+        expr = expr.kind.value;
+      }
+
+      // Check for an expected ref
+      if (arg.isRef) {
+        if (expr.kind.kind !== 'Ref') {
+          appendToLog(context.log, expr.range, `Expected "&" before this argument`);
+        } else {
+          const value = expr.kind.value;
+          if (value.kind.kind !== 'Name' || findLocal(scope, value.kind.value) === null) {
+            appendToLog(context.log, expr.range, `The "&" operator only works on local variable names`);
+          }
+        }
+      }
+
+      // Check for an unexpected ref
+      else if (expr.kind.kind === 'Ref') {
+        appendToLog(context.log, expr.range, `Cannot use "&" with this argument`);
+      }
+
+      // Unwrap the ref if there is one
+      if (expr.kind.kind === 'Ref') {
+        expr = expr.kind.value;
+      }
+
+      results.push(compileExpr(context, expr, graph, scope, arg.typeID));
     }
   }
 
@@ -336,14 +364,6 @@ function compileExpr(context: Context, expr: Expr, graph: Graph, scope: Scope, c
   let result = errorResult(context, graph);
 
   switch (expr.kind.kind) {
-    case 'Ref':
-      result = compileExpr(context, expr.kind.value, graph, scope, castTo);
-      break;
-
-    case 'Key':
-      result = compileExpr(context, expr.kind.value, graph, scope, castTo);
-      break;
-
     case 'Bool':
       result = {
         typeID: context.boolTypeID,
@@ -456,6 +476,13 @@ function compileExpr(context: Context, expr: Expr, graph: Graph, scope: Scope, c
 
     case 'Index':
       break;
+
+    case 'Ref':
+      appendToLog(context.log, expr.range, `Cannot use "&" here`);
+      break;
+
+    case 'Key':
+      throw new Error('Internal error');
 
     default: {
       const checkCovered: void = expr.kind;

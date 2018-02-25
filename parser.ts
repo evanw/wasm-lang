@@ -60,7 +60,7 @@ export interface Stmt {
 }
 
 export type StmtKind =
-  {kind: 'Var', name: string, type: TypeExpr, value: Expr} |
+  {kind: 'Var', name: string, nameRange: Range, type: TypeExpr, value: Expr} |
   {kind: 'Return', value: Expr | null} |
   {kind: 'If', test: Expr, yes: Stmt[], no: Stmt[]} |
   {kind: 'While', test: Expr, body: Stmt[]} |
@@ -247,6 +247,13 @@ function parsePrefix(lexer: Lexer): Expr | null {
       return {range: spanSince(lexer, start), kind: {kind: 'Unary', op: UnOp.Neg, value}};
     }
 
+    case Token.Ampersand: {
+      advance(lexer);
+      const value = parseExpr(lexer, LEVEL_PREFIX);
+      if (value === null) return null;
+      return {range: spanSince(lexer, start), kind: {kind: 'Ref', value}};
+    }
+
     case Token.OpenParenthesis: {
       advance(lexer);
       const value = parseExpr(lexer, LEVEL_LOWEST);
@@ -396,19 +403,14 @@ function parseExpr(lexer: Lexer, level: number): Expr | null {
 
         while (lexer.token !== Token.CloseParenthesis) {
           const start = lexer.start;
-          const isRef = eat(lexer, Token.Ampersand);
           const isMaybeKey = lexer.token === Token.Identifier;
           let value = parseExpr(lexer, LEVEL_LOWEST);
           if (value === null) return null;
-          if (isRef) value = {range: spanSince(lexer, start), kind: {kind: 'Ref', value}};
           else if (isMaybeKey && value.kind.kind === 'Name' && eat(lexer, Token.Colon)) {
             const name = value.kind.value;
             const nameRange = spanSince(lexer, value.range.start);
-            const start2 = lexer.start;
-            const isRef2 = eat(lexer, Token.Ampersand);
             value = parseExpr(lexer, LEVEL_LOWEST);
             if (value === null) return null;
-            if (isRef2) value = {range: spanSince(lexer, start2), kind: {kind: 'Ref', value}};
             value = {range: spanSince(lexer, start), kind: {kind: 'Key', name, nameRange, value}};
           }
           args.push(value);
@@ -468,6 +470,7 @@ function parseStmts(lexer: Lexer): Stmt[] | null {
       case Token.Var: {
         advance(lexer);
         const name = currentText(lexer);
+        const nameRange = currentRange(lexer);
         if (!expect(lexer, Token.Identifier)) return null;
         const type: TypeExpr | null = lexer.token === Token.Equals
           ? {range: currentRange(lexer), kind: {kind: 'Inferred'}}
@@ -475,7 +478,7 @@ function parseStmts(lexer: Lexer): Stmt[] | null {
         if (type === null || !expect(lexer, Token.Equals)) return null;
         const value = parseExpr(lexer, LEVEL_LOWEST);
         if (value === null) return null;
-        stmts.push({range: spanSince(lexer, start), kind: {kind: 'Var', name, type, value}});
+        stmts.push({range: spanSince(lexer, start), kind: {kind: 'Var', name, nameRange, type, value}});
         break;
       }
 

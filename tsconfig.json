@@ -1,7 +1,7 @@
 {
   "compilerOptions": {
     "target": "es5",
-    "noUnusedLocals": false,
+    "noUnusedLocals": true,
     "noUnusedParameters": true,
     "allowUnusedLabels": false,
     "allowUnreachableCode": false,
