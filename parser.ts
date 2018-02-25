@@ -103,7 +103,7 @@ export type ExprKind =
   {kind: 'Unary', op: UnOp, value: Expr} |
   {kind: 'Binary', op: BinOp, left: Expr, right: Expr} |
   {kind: 'Call', name: string, nameRange: Range, args: Expr[]} |
-  {kind: 'Dot', target: Expr, name: string} |
+  {kind: 'Dot', target: Expr, name: string, nameRange: Range} |
   {kind: 'Index', target: Expr, value: Expr};
 
 export interface TypeExpr {
@@ -217,7 +217,7 @@ function parsePrefix(lexer: Lexer): Expr | null {
           case 'n': value = '\n'.charCodeAt(0); break;
           case 'r': value = '\r'.charCodeAt(0); break;
           case 't': value = '\t'.charCodeAt(0); break;
-          default: appendToLog(lexer.log, currentRange(lexer), `Invalid character escape sequence`); break;
+          default: appendToLog(lexer.log, currentRange(lexer), `Invalid escape sequence in character literal`); break;
         }
       } else {
         appendToLog(lexer.log, currentRange(lexer), `Invalid character literal`);
@@ -383,8 +383,9 @@ function parseExpr(lexer: Lexer, level: number): Expr | null {
       case Token.Dot: {
         advance(lexer);
         const name = currentText(lexer);
+        const nameRange = currentRange(lexer);
         if (!expect(lexer, Token.Identifier)) return null;
-        left = {range: spanSince(lexer, start), kind: {kind: 'Dot', target: left, name}};
+        left = {range: spanSince(lexer, start), kind: {kind: 'Dot', target: left, name, nameRange}};
         break;
       }
 

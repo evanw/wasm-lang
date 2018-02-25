@@ -379,10 +379,7 @@ function compileExpr(context: Context, expr: Expr, graph: Graph, scope: Scope, c
       break;
 
     case 'String':
-      result = {
-        typeID: context.stringTypeID,
-        value: createConstant(graph, 0),
-      };
+      appendToLog(context.log, expr.range, `String literals are not currently implemented`);
       break;
 
     case 'Name': {
@@ -410,7 +407,7 @@ function compileExpr(context: Context, expr: Expr, graph: Graph, scope: Scope, c
             value: createConstant(graph, 0),
           };
         } else {
-          appendToLog(context.log, expr.range, `Cannot use "${name}" as a value here`);
+          appendToLog(context.log, expr.range, `Cannot use the name "${name}" as a value`);
         }
         break;
       }
@@ -420,12 +417,15 @@ function compileExpr(context: Context, expr: Expr, graph: Graph, scope: Scope, c
     }
 
     case 'Array':
+      appendToLog(context.log, expr.range, `Array literals are not currently implemented`);
       break;
 
     case 'Unary':
+      appendToLog(context.log, expr.range, `Unary operators are not currently implemented`);
       break;
 
     case 'Binary':
+      appendToLog(context.log, expr.range, `Binary operators are not currently implemented`);
       break;
 
     case 'Call': {
@@ -471,10 +471,35 @@ function compileExpr(context: Context, expr: Expr, graph: Graph, scope: Scope, c
       break;
     }
 
-    case 'Dot':
+    case 'Dot': {
+      const name = expr.kind.name;
+      const target = compileExpr(context, expr.kind.target, graph, scope, null);
+      if (target.typeID !== context.errorTypeID) {
+        const type = context.types[target.typeID.index];
+        if (type.ctors.length !== 1) {
+          appendToLog(context.log, expr.kind.nameRange, `Cannot access the field "${name}" because the type "${type.name}" has multiple constructors`);
+        } else {
+          let found = false;
+          for (const arg of type.ctors[0].args) {
+            if (arg.name === name) {
+              found = true;
+              result = {
+                typeID: arg.typeID,
+                value: createConstant(graph, 0),
+              };
+              break;
+            }
+          }
+          if (!found) {
+            appendToLog(context.log, expr.kind.nameRange, `There is no field named "${name}" on type "${type.name}"`);
+          }
+        }
+      }
       break;
+    }
 
     case 'Index':
+      appendToLog(context.log, expr.range, `The "[]" operator is not currently implemented`);
       break;
 
     case 'Ref':
