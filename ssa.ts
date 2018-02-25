@@ -15,7 +15,7 @@ export enum RawType {
 export type Ins =
   {kind: 'Nop'} |
   {kind: 'Alias', value: InsRef, type: RawType} |
-  {kind: 'Call', index: number, args: InsRef[], type: RawType} |
+  {kind: 'Call', index: number, args: InsRef[], retType: RawType} |
 
   {kind: 'PtrGlobal', index: number} |
   {kind: 'PtrStack', index: number} |
@@ -212,7 +212,7 @@ function typeOf(graph: Graph, block: number, ref: InsRef): RawType {
       return ins.type;
 
     case 'Call':
-      return ins.type;
+      return ins.retType;
 
     case 'MemGet8':
     case 'MemGet32':

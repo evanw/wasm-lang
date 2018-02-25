@@ -1,6 +1,6 @@
 import { Log, Range, appendToLog } from './log';
 import { Parsed, TypeExpr, CtorDecl, DefDecl, Stmt, Expr } from './parser';
-import { Graph, RawType, createGraph, createLocal, ValueRef, createConstant, addLocalGet, Code, createBlock, addLocalSet, setJump } from './ssa';
+import { Graph, RawType, createGraph, createLocal, ValueRef, createConstant, addLocalGet, Code, createBlock, addLocalSet, setJump, addIns, InsRef, unwrapRef } from './ssa';
 
 interface TypeID {
   index: number;
@@ -555,10 +555,15 @@ function compileExpr(context: Context, expr: Expr, graph: Graph, scope: Scope, c
       // Check for a function
       else if (global.kind === 'Def') {
         const def = context.defs[global.defID];
-        const args = compileArgs(context, expr.range, expr.kind.args, graph, scope, def.args);
+        const retType = rawTypeForTypeID(context, def.retTypeID);
+        const results = compileArgs(context, expr.range, expr.kind.args, graph, scope, def.args);
+        const args: InsRef[] = [];
+        for (const result of results) {
+          args.push(unwrapRef(graph, context.currentBlock, result.value));
+        }
         result = {
           typeID: def.retTypeID,
-          value: createConstant(graph, 0),
+          value: addIns(graph, context.currentBlock, {kind: 'Call', index: global.defID, args, retType}),
         };
       }
 
