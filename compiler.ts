@@ -282,9 +282,38 @@ function compileStmts(context: Context, stmts: Stmt[], graph: Graph, parent: Sco
       }
 
       case 'If': {
+        // Compile the test
         const test = compileExpr(context, stmt.kind.test, graph, scope, context.boolTypeID);
-        compileStmts(context, stmt.kind.yes, graph, scope, retTypeID);
-        compileStmts(context, stmt.kind.no, graph, scope, retTypeID);
+        const yes = createBlock(graph);
+        const after = createBlock(graph);
+
+        // Without an else
+        if (stmt.kind.no.length === 0) {
+          setJump(graph, context.currentBlock, {kind: 'Branch', value: test.value.ref, yes, no: after});
+
+          // Then branch
+          context.currentBlock = yes;
+          compileStmts(context, stmt.kind.yes, graph, scope, retTypeID);
+          setJump(graph, context.currentBlock, {kind: 'Goto', target: after});
+        }
+
+        // With an else
+        else {
+          const no = createBlock(graph);
+          setJump(graph, context.currentBlock, {kind: 'Branch', value: test.value.ref, yes, no});
+
+          // Then branch
+          context.currentBlock = yes;
+          compileStmts(context, stmt.kind.yes, graph, scope, retTypeID);
+          setJump(graph, context.currentBlock, {kind: 'Goto', target: after});
+
+          // Else branch
+          context.currentBlock = no;
+          compileStmts(context, stmt.kind.no, graph, scope, retTypeID);
+          setJump(graph, context.currentBlock, {kind: 'Goto', target: after});
+        }
+
+        context.currentBlock = after;
         break;
       }
 
