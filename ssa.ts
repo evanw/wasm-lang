@@ -179,6 +179,79 @@ function refToString(func: Func, ref: InsRef): string {
   return func.constants[~ref.index].toString();
 }
 
+function blockToString(code: Code, func: Func, block: BasicBlock, indent: string): string {
+  let text = '';
+
+  for (let i = 0; i < block.insList.length; i++) {
+    const ins = block.insList[i];
+
+    switch (ins.kind) {
+      case 'Nop':
+        break;
+
+      case 'Alias':
+        text += `${indent}t${i} = ${refToString(func, ins.value)}\n`;
+        break;
+
+      case 'Call': {
+        const args = [code.funcs[ins.index].name];
+        for (const arg of ins.args) {
+          args.push(refToString(func, arg));
+        }
+        text += `${indent}t${i} = call ${args.join(', ')}\n`;
+        break;
+      }
+
+      case 'PtrGlobal':
+      case 'PtrStack':
+      case 'MemAlloc':
+      case 'MemFree':
+      case 'MemCopy':
+      case 'MemGet8':
+      case 'MemSet8':
+      case 'MemGet32':
+      case 'MemSet32':
+        break;
+
+      case 'LocalGet':
+        text += `${indent}t${i} = v${ins.local}\n`;
+        break;
+
+      case 'LocalSet':
+        text += `${indent}v${ins.local} = ${refToString(func, ins.value)}\n`;
+        break;
+
+      case 'Retain':
+        text += `${indent}retain ${refToString(func, ins.ptr)}\n`;
+        break;
+
+      case 'Release':
+        text += `${indent}release ${refToString(func, ins.ptr)}, ${code.funcs[ins.dtor].name}\n`;
+        break;
+
+      case 'Eq32':
+      case 'NotEq32':
+      case 'Lt32S':
+      case 'Lt32U':
+      case 'LtEq32S':
+      case 'LtEq32U':
+      case 'Add32':
+      case 'Sub32':
+      case 'Mul32':
+      case 'Div32S':
+      case 'Div32U':
+        break;
+
+      default: {
+        const checkCovered: void = ins;
+        throw new Error('Internal error');
+      }
+    }
+  }
+
+  return text;
+}
+
 export function codeToString(code: Code): string {
   let text = '';
 
@@ -195,73 +268,7 @@ export function codeToString(code: Code): string {
     for (let i = 0; i < blocks.length; i++) {
       const block = blocks[i];
       text += `  b${i}:\n`;
-
-      for (let j = 0; j < block.insList.length; j++) {
-        const ins = block.insList[j];
-
-        switch (ins.kind) {
-          case 'Nop':
-            break;
-
-          case 'Alias':
-            text += `    t${j} = ${refToString(func, ins.value)}\n`;
-            break;
-
-          case 'Call': {
-            const args = [code.funcs[ins.index].name];
-            for (const arg of ins.args) {
-              args.push(refToString(func, arg));
-            }
-            text += `    t${j} = call ${args.join(', ')}\n`;
-            break;
-          }
-
-          case 'PtrGlobal':
-          case 'PtrStack':
-          case 'MemAlloc':
-          case 'MemFree':
-          case 'MemCopy':
-          case 'MemGet8':
-          case 'MemSet8':
-          case 'MemGet32':
-          case 'MemSet32':
-            break;
-
-          case 'LocalGet':
-            text += `    t${j} = v${ins.local}\n`;
-            break;
-
-          case 'LocalSet':
-            text += `    v${ins.local} = ${refToString(func, ins.value)}\n`;
-            break;
-
-          case 'Retain':
-            text += `    retain ${refToString(func, ins.ptr)}\n`;
-            break;
-
-          case 'Release':
-            text += `    release ${refToString(func, ins.ptr)}, ${code.funcs[ins.dtor].name}\n`;
-            break;
-
-          case 'Eq32':
-          case 'NotEq32':
-          case 'Lt32S':
-          case 'Lt32U':
-          case 'LtEq32S':
-          case 'LtEq32U':
-          case 'Add32':
-          case 'Sub32':
-          case 'Mul32':
-          case 'Div32S':
-          case 'Div32U':
-            break;
-
-          default: {
-            const checkCovered: void = ins;
-            throw new Error('Internal error');
-          }
-        }
-      }
+      text += blockToString(code, func, block, '    ');
 
       switch (block.jump.kind) {
         case 'Missing':
