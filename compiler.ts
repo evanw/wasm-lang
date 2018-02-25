@@ -1,6 +1,6 @@
 import { Log, Range, appendToLog } from './log';
 import { Parsed, TypeExpr, CtorDecl, DefDecl, Stmt, Expr } from './parser';
-import { Graph, RawType, createGraph, createLocal, ValueRef, createConstant, addLocalGet, Code, createBlock, addLocalSet, setJump, addIns, InsRef, unwrapRef } from './ssa';
+import { Func, RawType, createFunc, createLocal, ValueRef, createConstant, addLocalGet, Code, createBlock, addLocalSet, setJump, addIns, InsRef, unwrapRef } from './ssa';
 
 interface TypeID {
   index: number;
@@ -28,7 +28,6 @@ interface DefData {
   name: string;
   args: ArgData[];
   retTypeID: TypeID;
-  graph: Graph | null;
 }
 
 type GlobalRef =
@@ -199,30 +198,33 @@ function compileDefs(context: Context, parsed: Parsed): void {
       }
       const retTypeID = resolveTypeExpr(context, def.ret);
       list.push([context.defs.length, def]);
-      context.defs.push({name: def.name, args, retTypeID, graph: null});
+      context.defs.push({name: def.name, args, retTypeID});
     }
   }
 
   // Compile each function
   for (const [defID, def] of list) {
     const data = context.defs[defID];
-    const graph = createGraph(context.ptrType);
+    const func = createFunc(def.name, context.ptrType);
     const scope: Scope = {parent: null, locals: {}};
 
     // Add a local variable for each argument
     for (let i = 0; i < def.args.length; i++) {
       const arg = def.args[i];
-      defineLocal(context, graph, scope, arg.name, arg.nameRange, data.args[i].typeID);
+      const typeID = data.args[i].typeID;
+      defineLocal(context, func, scope, arg.name, arg.nameRange, typeID);
+      func.argTypes.push(rawTypeForTypeID(context, typeID));
     }
 
     // Compile the body
-    context.currentBlock = createBlock(graph);
-    compileStmts(context, def.body, graph, scope, data.retTypeID);
-    data.graph = graph;
+    context.currentBlock = createBlock(func);
+    func.retType = rawTypeForTypeID(context, data.retTypeID);
+    compileStmts(context, def.body, func, scope, data.retTypeID);
+    context.code.funcs.push(func);
   }
 }
 
-function compileStmts(context: Context, stmts: Stmt[], graph: Graph, parent: Scope, retTypeID: TypeID): void {
+function compileStmts(context: Context, stmts: Stmt[], func: Func, parent: Scope, retTypeID: TypeID): void {
   const scope = {parent, locals: {}};
 
   for (const stmt of stmts) {
@@ -235,7 +237,7 @@ function compileStmts(context: Context, stmts: Stmt[], graph: Graph, parent: Sco
 
         // Inferred type
         if (type.kind.kind === 'Inferred') {
-          initial = compileExpr(context, value, graph, scope, null);
+          initial = compileExpr(context, value, func, scope, null);
           typeID = initial.typeID;
 
           // Forbid creating variables of certain types
@@ -248,11 +250,11 @@ function compileStmts(context: Context, stmts: Stmt[], graph: Graph, parent: Sco
         // Explicit type
         else {
           typeID = resolveTypeExpr(context, type);
-          initial = compileExpr(context, value, graph, scope, typeID);
+          initial = compileExpr(context, value, func, scope, typeID);
         }
 
-        const local = defineLocal(context, graph, scope, stmt.kind.name, stmt.kind.nameRange, typeID);
-        addLocalSet(graph, context.currentBlock, local, initial.value);
+        const local = defineLocal(context, func, scope, stmt.kind.name, stmt.kind.nameRange, typeID);
+        addLocalSet(func, context.currentBlock, local, initial.value);
         break;
       }
 
@@ -262,9 +264,9 @@ function compileStmts(context: Context, stmts: Stmt[], graph: Graph, parent: Sco
           if (retTypeID === context.voidTypeID) {
             appendToLog(context.log, stmt.kind.value.range, `Unexpected return value in a function without a return type`);
           } else {
-            const result = compileExpr(context, stmt.kind.value, graph, scope, retTypeID);
-            setJump(graph, context.currentBlock, {kind: 'Return', value: result.value.ref});
-            context.currentBlock = createBlock(graph);
+            const result = compileExpr(context, stmt.kind.value, func, scope, retTypeID);
+            setJump(func, context.currentBlock, {kind: 'Return', value: result.value.ref});
+            context.currentBlock = createBlock(func);
           }
         }
 
@@ -273,8 +275,8 @@ function compileStmts(context: Context, stmts: Stmt[], graph: Graph, parent: Sco
           if (retTypeID !== context.voidTypeID) {
             appendToLog(context.log, stmt.range, `Must return a value of type "${context.types[retTypeID.index].name}"`);
           } else {
-            setJump(graph, context.currentBlock, {kind: 'ReturnVoid'});
-            context.currentBlock = createBlock(graph);
+            setJump(func, context.currentBlock, {kind: 'ReturnVoid'});
+            context.currentBlock = createBlock(func);
           }
         }
         break;
@@ -285,8 +287,8 @@ function compileStmts(context: Context, stmts: Stmt[], graph: Graph, parent: Sco
 
         // The parser handles out-of-bounds error reporting
         if (count >= 1 && count <= context.loops.length) {
-          const after = createBlock(graph);
-          setJump(graph, context.currentBlock, {kind: 'Goto', target: context.loops[count - 1].breakTarget});
+          const after = createBlock(func);
+          setJump(func, context.currentBlock, {kind: 'Goto', target: context.loops[count - 1].breakTarget});
           context.currentBlock = after;
         }
         break;
@@ -297,8 +299,8 @@ function compileStmts(context: Context, stmts: Stmt[], graph: Graph, parent: Sco
 
         // The parser handles out-of-bounds error reporting
         if (count >= 1 && count <= context.loops.length) {
-          const after = createBlock(graph);
-          setJump(graph, context.currentBlock, {kind: 'Goto', target: context.loops[count - 1].continueTarget});
+          const after = createBlock(func);
+          setJump(func, context.currentBlock, {kind: 'Goto', target: context.loops[count - 1].continueTarget});
           context.currentBlock = after;
         }
         break;
@@ -306,34 +308,34 @@ function compileStmts(context: Context, stmts: Stmt[], graph: Graph, parent: Sco
 
       case 'If': {
         // Compile the test
-        const test = compileExpr(context, stmt.kind.test, graph, scope, context.boolTypeID);
-        const yes = createBlock(graph);
-        const after = createBlock(graph);
+        const test = compileExpr(context, stmt.kind.test, func, scope, context.boolTypeID);
+        const yes = createBlock(func);
+        const after = createBlock(func);
 
         // Without an else
         if (stmt.kind.no.length === 0) {
-          setJump(graph, context.currentBlock, {kind: 'Branch', value: test.value.ref, yes, no: after});
+          setJump(func, context.currentBlock, {kind: 'Branch', value: test.value.ref, yes, no: after});
 
           // Then branch
           context.currentBlock = yes;
-          compileStmts(context, stmt.kind.yes, graph, scope, retTypeID);
-          setJump(graph, context.currentBlock, {kind: 'Goto', target: after});
+          compileStmts(context, stmt.kind.yes, func, scope, retTypeID);
+          setJump(func, context.currentBlock, {kind: 'Goto', target: after});
         }
 
         // With an else
         else {
-          const no = createBlock(graph);
-          setJump(graph, context.currentBlock, {kind: 'Branch', value: test.value.ref, yes, no});
+          const no = createBlock(func);
+          setJump(func, context.currentBlock, {kind: 'Branch', value: test.value.ref, yes, no});
 
           // Then branch
           context.currentBlock = yes;
-          compileStmts(context, stmt.kind.yes, graph, scope, retTypeID);
-          setJump(graph, context.currentBlock, {kind: 'Goto', target: after});
+          compileStmts(context, stmt.kind.yes, func, scope, retTypeID);
+          setJump(func, context.currentBlock, {kind: 'Goto', target: after});
 
           // Else branch
           context.currentBlock = no;
-          compileStmts(context, stmt.kind.no, graph, scope, retTypeID);
-          setJump(graph, context.currentBlock, {kind: 'Goto', target: after});
+          compileStmts(context, stmt.kind.no, func, scope, retTypeID);
+          setJump(func, context.currentBlock, {kind: 'Goto', target: after});
         }
 
         context.currentBlock = after;
@@ -341,33 +343,33 @@ function compileStmts(context: Context, stmts: Stmt[], graph: Graph, parent: Sco
       }
 
       case 'While': {
-        const header = createBlock(graph);
-        const body = createBlock(graph);
-        const after = createBlock(graph);
+        const header = createBlock(func);
+        const body = createBlock(func);
+        const after = createBlock(func);
 
         // Compile the test
-        setJump(graph, context.currentBlock, {kind: 'Goto', target: header});
+        setJump(func, context.currentBlock, {kind: 'Goto', target: header});
         context.currentBlock = header;
-        const test = compileExpr(context, stmt.kind.test, graph, scope, context.boolTypeID);
-        setJump(graph, context.currentBlock, {kind: 'Branch', value: test.value.ref, yes: body, no: after});
+        const test = compileExpr(context, stmt.kind.test, func, scope, context.boolTypeID);
+        setJump(func, context.currentBlock, {kind: 'Branch', value: test.value.ref, yes: body, no: after});
 
         // Compile the body
         context.currentBlock = body;
         context.loops.push({continueTarget: header, breakTarget: after});
-        compileStmts(context, stmt.kind.body, graph, scope, retTypeID);
+        compileStmts(context, stmt.kind.body, func, scope, retTypeID);
         context.loops.pop();
-        setJump(graph, context.currentBlock, {kind: 'Goto', target: header});
+        setJump(func, context.currentBlock, {kind: 'Goto', target: header});
         context.currentBlock = after;
         break;
       }
 
       case 'Assign': {
-        const value = compileExpr(context, stmt.kind.value, graph, scope, null);
+        const value = compileExpr(context, stmt.kind.value, func, scope, null);
         break;
       }
 
       case 'Expr':
-        compileExpr(context, stmt.kind.value, graph, scope, null);
+        compileExpr(context, stmt.kind.value, func, scope, null);
         break;
 
       default: {
@@ -383,11 +385,11 @@ interface Result {
   value: ValueRef;
 }
 
-function errorResult(context: Context, graph: Graph): Result {
-  return {typeID: context.errorTypeID, value: createConstant(graph, 0)};
+function errorResult(context: Context, func: Func): Result {
+  return {typeID: context.errorTypeID, value: createConstant(func, 0)};
 }
 
-function compileArgs(context: Context, range: Range, exprs: Expr[], graph: Graph, scope: Scope, args: ArgData[]): Result[] {
+function compileArgs(context: Context, range: Range, exprs: Expr[], func: Func, scope: Scope, args: ArgData[]): Result[] {
   const results: Result[] = [];
 
   if (exprs.length !== args.length) {
@@ -396,7 +398,7 @@ function compileArgs(context: Context, range: Range, exprs: Expr[], graph: Graph
     appendToLog(context.log, range, `Expected ${args.length} argument${expected} but found ${exprs.length} argument${found}`);
 
     for (let i = 0; i < args.length; i++) {
-      results.push(errorResult(context, graph));
+      results.push(errorResult(context, func));
     }
   }
 
@@ -450,28 +452,28 @@ function compileArgs(context: Context, range: Range, exprs: Expr[], graph: Graph
         expr = expr.kind.value;
       }
 
-      results.push(compileExpr(context, expr, graph, scope, arg.typeID));
+      results.push(compileExpr(context, expr, func, scope, arg.typeID));
     }
   }
 
   return results;
 }
 
-function compileExpr(context: Context, expr: Expr, graph: Graph, scope: Scope, castTo: TypeID | null): Result {
-  let result = errorResult(context, graph);
+function compileExpr(context: Context, expr: Expr, func: Func, scope: Scope, castTo: TypeID | null): Result {
+  let result = errorResult(context, func);
 
   switch (expr.kind.kind) {
     case 'Bool':
       result = {
         typeID: context.boolTypeID,
-        value: createConstant(graph, expr.kind.value ? 1 : 0),
+        value: createConstant(func, expr.kind.value ? 1 : 0),
       };
       break;
 
     case 'Int':
       result = {
         typeID: context.intTypeID,
-        value: createConstant(graph, expr.kind.value),
+        value: createConstant(func, expr.kind.value),
       };
       break;
 
@@ -487,7 +489,7 @@ function compileExpr(context: Context, expr: Expr, graph: Graph, scope: Scope, c
       if (local !== null) {
         result = {
           typeID: local.typeID,
-          value: addLocalGet(graph, context.currentBlock, local.index),
+          value: addLocalGet(func, context.currentBlock, local.index),
         };
         break;
       }
@@ -498,10 +500,10 @@ function compileExpr(context: Context, expr: Expr, graph: Graph, scope: Scope, c
         global = forwardToDefaultCtor(context, global);
         if (global.kind === 'Ctor') {
           const ctor = context.types[global.typeID.index].ctors[global.index];
-          const args = compileArgs(context, expr.range, [], graph, scope, ctor.args);
+          const args = compileArgs(context, expr.range, [], func, scope, ctor.args);
           result = {
             typeID: global.typeID,
-            value: createConstant(graph, 0),
+            value: createConstant(func, 0),
           };
         } else {
           appendToLog(context.log, expr.range, `Cannot use the name "${name}" as a value`);
@@ -545,10 +547,10 @@ function compileExpr(context: Context, expr: Expr, graph: Graph, scope: Scope, c
       global = forwardToDefaultCtor(context, global);
       if (global.kind === 'Ctor') {
         const ctor = context.types[global.typeID.index].ctors[global.index];
-        const args = compileArgs(context, expr.range, expr.kind.args, graph, scope, ctor.args);
+        const args = compileArgs(context, expr.range, expr.kind.args, func, scope, ctor.args);
         result = {
           typeID: global.typeID,
-          value: createConstant(graph, 0),
+          value: createConstant(func, 0),
         };
       }
 
@@ -556,14 +558,14 @@ function compileExpr(context: Context, expr: Expr, graph: Graph, scope: Scope, c
       else if (global.kind === 'Def') {
         const def = context.defs[global.defID];
         const retType = rawTypeForTypeID(context, def.retTypeID);
-        const results = compileArgs(context, expr.range, expr.kind.args, graph, scope, def.args);
+        const results = compileArgs(context, expr.range, expr.kind.args, func, scope, def.args);
         const args: InsRef[] = [];
         for (const result of results) {
-          args.push(unwrapRef(graph, context.currentBlock, result.value));
+          args.push(unwrapRef(func, context.currentBlock, result.value));
         }
         result = {
           typeID: def.retTypeID,
-          value: addIns(graph, context.currentBlock, {kind: 'Call', index: global.defID, args, retType}),
+          value: addIns(func, context.currentBlock, {kind: 'Call', index: global.defID, args, retType}),
         };
       }
 
@@ -575,7 +577,7 @@ function compileExpr(context: Context, expr: Expr, graph: Graph, scope: Scope, c
 
     case 'Dot': {
       const name = expr.kind.name;
-      const target = compileExpr(context, expr.kind.target, graph, scope, null);
+      const target = compileExpr(context, expr.kind.target, func, scope, null);
       if (target.typeID !== context.errorTypeID) {
         const type = context.types[target.typeID.index];
         if (type.ctors.length !== 1) {
@@ -587,7 +589,7 @@ function compileExpr(context: Context, expr: Expr, graph: Graph, scope: Scope, c
               found = true;
               result = {
                 typeID: arg.typeID,
-                value: createConstant(graph, 0),
+                value: createConstant(func, 0),
               };
               break;
             }
@@ -621,7 +623,7 @@ function compileExpr(context: Context, expr: Expr, graph: Graph, scope: Scope, c
     return result;
   }
 
-  return cast(context, expr.range, result, castTo, graph);
+  return cast(context, expr.range, result, castTo, func);
 }
 
 function forwardToDefaultCtor(context: Context, global: GlobalRef): GlobalRef {
@@ -634,16 +636,16 @@ function forwardToDefaultCtor(context: Context, global: GlobalRef): GlobalRef {
   return global;
 }
 
-function cast(context: Context, range: Range, result: Result, to: TypeID, graph: Graph): Result {
+function cast(context: Context, range: Range, result: Result, to: TypeID, func: Func): Result {
   if (result.typeID === context.errorTypeID || to === context.errorTypeID) {
-    return errorResult(context, graph);
+    return errorResult(context, func);
   }
 
   if (result.typeID !== to) {
     const expected = context.types[to.index].name;
     const found = context.types[result.typeID.index].name;
     appendToLog(context.log, range, `Expected type "${expected}" but found type "${found}"`);
-    return errorResult(context, graph);
+    return errorResult(context, func);
   }
 
   return result;
@@ -667,14 +669,14 @@ function rawTypeForTypeID(context: Context, typeID: TypeID): RawType {
   return context.ptrType;
 }
 
-function defineLocal(context: Context, graph: Graph, scope: Scope, name: string, range: Range, typeID: TypeID): number {
+function defineLocal(context: Context, func: Func, scope: Scope, name: string, range: Range, typeID: TypeID): number {
   const local = findLocal(scope, name);
   if (local !== null) {
     appendToLog(context.log, range, `The name "${name}" is already used`);
     return local.index;
   }
 
-  const index = createLocal(graph, rawTypeForTypeID(context, typeID));
+  const index = createLocal(func, rawTypeForTypeID(context, typeID));
   scope.locals[name] = {typeID, index};
   return index;
 }

@@ -76,7 +76,10 @@ export interface BasicBlock {
   spills: {[index: number]: number};
 }
 
-export interface Graph {
+export interface Func {
+  name: string;
+  argTypes: RawType[];
+  retType: RawType;
   blocks: BasicBlock[];
 
   // This is different for 32-bit vs. 64-bit
@@ -92,13 +95,6 @@ export interface Graph {
   stack: number[];
 }
 
-export interface Func {
-  name: string;
-  args: RawType[];
-  ret: RawType;
-  graph: Graph;
-}
-
 export interface Code {
   funcs: Func[];
 
@@ -106,8 +102,11 @@ export interface Code {
   globals: number[];
 }
 
-export function createGraph(ptrType: RawType): Graph {
+export function createFunc(name: string, ptrType: RawType): Func {
   return {
+    name,
+    argTypes: [],
+    retType: RawType.Void,
     ptrType,
     blocks: [],
     constants: [0],
@@ -116,18 +115,18 @@ export function createGraph(ptrType: RawType): Graph {
   };
 }
 
-export function createBlock(graph: Graph): number {
-  graph.blocks.push({
+export function createBlock(func: Func): number {
+  func.blocks.push({
     insList: [],
     jump: {kind: 'Missing'},
     previousLocals: {},
     spills: {},
   });
-  return graph.blocks.length - 1;
+  return func.blocks.length - 1;
 }
 
-export function setJump(graph: Graph, block: number, jump: Jump): void {
-  graph.blocks[block].jump = jump;
+export function setJump(func: Func, block: number, jump: Jump): void {
+  func.blocks[block].jump = jump;
 }
 
 export interface ValueRef {
@@ -137,61 +136,182 @@ export interface ValueRef {
   block: number;
 }
 
-export function createLocal(graph: Graph, type: RawType): number {
-  graph.locals.push(type);
-  return graph.locals.length - 1;
+export function createLocal(func: Func, type: RawType): number {
+  func.locals.push(type);
+  return func.locals.length - 1;
 }
 
-export function createConstant(graph: Graph, value: number): ValueRef {
+export function createConstant(func: Func, value: number): ValueRef {
   if (value === 0) return {block: -1, ref: {index: -1}};
-  graph.constants.push(value);
-  return {block: -1, ref: {index: -graph.constants.length}};
+  func.constants.push(value);
+  return {block: -1, ref: {index: -func.constants.length}};
 }
 
-export function unwrapRef(graph: Graph, block: number, value: ValueRef): InsRef {
+export function unwrapRef(func: Func, block: number, value: ValueRef): InsRef {
   if (value.block === block || value.block < 0) return value.ref;
-  const local = spillToLocal(graph, value.block, value.ref);
-  return addLocalGet(graph, block, local).ref;
+  const local = spillToLocal(func, value.block, value.ref);
+  return addLocalGet(func, block, local).ref;
 }
 
-export function addIns(graph: Graph, block: number, ins: Ins): ValueRef {
-  const insList = graph.blocks[block].insList;
+export function addIns(func: Func, block: number, ins: Ins): ValueRef {
+  const insList = func.blocks[block].insList;
   const index = insList.length;
   insList.push(ins);
   return {block, ref: {index}};
 }
 
-export function addLocalGet(graph: Graph, block: number, local: number): ValueRef {
-  const target = graph.blocks[block];
+export function addLocalGet(func: Func, block: number, local: number): ValueRef {
+  const target = func.blocks[block];
   const ref = target.previousLocals[local] || (target.previousLocals[local] =
-    addIns(graph, block, {kind: 'LocalGet', local}).ref);
+    addIns(func, block, {kind: 'LocalGet', local}).ref);
   return {block, ref};
 }
 
-export function addLocalSet(graph: Graph, block: number, local: number, value: ValueRef): ValueRef {
-  const target = graph.blocks[block];
-  const ref = unwrapRef(graph, block, value);
+export function addLocalSet(func: Func, block: number, local: number, value: ValueRef): ValueRef {
+  const target = func.blocks[block];
+  const ref = unwrapRef(func, block, value);
   target.previousLocals[local] = ref;
-  return addIns(graph, block, {kind: 'LocalSet', local, value: ref});
+  return addIns(func, block, {kind: 'LocalSet', local, value: ref});
 }
 
-function spillToLocal(graph: Graph, block: number, ref: InsRef): number {
+function refToString(func: Func, ref: InsRef): string {
+  if (ref.index >= 0) return `t${ref.index}`;
+  return func.constants[~ref.index].toString();
+}
+
+export function codeToString(code: Code): string {
+  let text = '';
+
+  for (const func of code.funcs) {
+    const args = func.argTypes.map((arg, i) => `v${i} ${RawType[arg]}`).join(', ');
+    const blocks = func.blocks;
+    text += `def ${func.name}(${args}) ${RawType[func.retType]}\n`;
+
+    text += '  locals:\n';
+    for (let i = 0; i < func.locals.length; i++) {
+      text += `    v${i} ${RawType[func.locals[i]]}\n`;
+    }
+
+    for (let i = 0; i < blocks.length; i++) {
+      const block = blocks[i];
+      text += `  b${i}:\n`;
+
+      for (let j = 0; j < block.insList.length; j++) {
+        const ins = block.insList[j];
+
+        switch (ins.kind) {
+          case 'Nop':
+            break;
+
+          case 'Alias':
+            text += `    t${j} = ${refToString(func, ins.value)}\n`;
+            break;
+
+          case 'Call': {
+            const args = [code.funcs[ins.index].name];
+            for (const arg of ins.args) {
+              args.push(refToString(func, arg));
+            }
+            text += `    t${j} = call ${args.join(', ')}\n`;
+            break;
+          }
+
+          case 'PtrGlobal':
+          case 'PtrStack':
+          case 'MemAlloc':
+          case 'MemFree':
+          case 'MemCopy':
+          case 'MemGet8':
+          case 'MemSet8':
+          case 'MemGet32':
+          case 'MemSet32':
+            break;
+
+          case 'LocalGet':
+            text += `    t${j} = v${ins.local}\n`;
+            break;
+
+          case 'LocalSet':
+            text += `    v${ins.local} = ${refToString(func, ins.value)}\n`;
+            break;
+
+          case 'Retain':
+            text += `    retain ${refToString(func, ins.ptr)}\n`;
+            break;
+
+          case 'Release':
+            text += `    release ${refToString(func, ins.ptr)}, ${code.funcs[ins.dtor].name}\n`;
+            break;
+
+          case 'Eq32':
+          case 'NotEq32':
+          case 'Lt32S':
+          case 'Lt32U':
+          case 'LtEq32S':
+          case 'LtEq32U':
+          case 'Add32':
+          case 'Sub32':
+          case 'Mul32':
+          case 'Div32S':
+          case 'Div32U':
+            break;
+
+          default: {
+            const checkCovered: void = ins;
+            throw new Error('Internal error');
+          }
+        }
+      }
+
+      switch (block.jump.kind) {
+        case 'Missing':
+          text += '    (missing)\n';
+          break;
+
+        case 'ReturnVoid':
+          text += '    return\n';
+          break;
+
+        case 'Return':
+          text += `    return ${refToString(func, block.jump.value)}\n`;
+          break;
+
+        case 'Goto':
+          text += `    goto b${block.jump.target}\n`;
+          break;
+
+        case 'Branch':
+          text += `    branch ${refToString(func, block.jump.value)} ? b${block.jump.yes} : b${block.jump.no}\n`;
+          break;
+
+        default: {
+          const checkCovered: void = block.jump;
+          throw new Error('Internal error');
+        }
+      }
+    }
+  }
+
+  return text;
+}
+
+function spillToLocal(func: Func, block: number, ref: InsRef): number {
   assert(ref.index >= 0);
-  const spills = graph.blocks[block].spills;
+  const spills = func.blocks[block].spills;
   if (ref.index in spills) return spills[ref.index];
-  const local = createLocal(graph, typeOf(graph, block, ref));
-  addLocalSet(graph, block, local, {block, ref});
+  const local = createLocal(func, typeOf(func, block, ref));
+  addLocalSet(func, block, local, {block, ref});
   spills[ref.index] = local;
   return local;
 }
 
-function typeOf(graph: Graph, block: number, ref: InsRef): RawType {
-  const target = graph.blocks[block];
+function typeOf(func: Func, block: number, ref: InsRef): RawType {
+  const target = func.blocks[block];
   const ins = target.insList[ref.index];
 
   switch (ins.kind) {
     case 'LocalGet':
-      return graph.locals[ins.local];
+      return func.locals[ins.local];
 
     case 'Nop':
     case 'MemFree':
@@ -206,7 +326,7 @@ function typeOf(graph: Graph, block: number, ref: InsRef): RawType {
     case 'PtrGlobal':
     case 'PtrStack':
     case 'MemAlloc':
-      return graph.ptrType;
+      return func.ptrType;
 
     case 'Alias':
       return ins.type;
