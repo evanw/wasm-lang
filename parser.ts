@@ -62,6 +62,8 @@ export interface Stmt {
 export type StmtKind =
   {kind: 'Var', name: string, nameRange: Range, type: TypeExpr, value: Expr} |
   {kind: 'Return', value: Expr | null} |
+  {kind: 'Break', count: number} |
+  {kind: 'Continue', count: number} |
   {kind: 'If', test: Expr, yes: Stmt[], no: Stmt[]} |
   {kind: 'While', test: Expr, body: Stmt[]} |
   {kind: 'Assign', target: Expr, value: Expr} |
@@ -459,7 +461,7 @@ function parseArgs(lexer: Lexer): ArgDecl[] | null {
   return args;
 }
 
-function parseStmts(lexer: Lexer): Stmt[] | null {
+function parseStmts(lexer: Lexer, enclosingLoopCount: number): Stmt[] | null {
   const stmts: Stmt[] = [];
   if (!expect(lexer, Token.OpenBrace)) return null;
   eat(lexer, Token.Newline);
@@ -495,11 +497,23 @@ function parseStmts(lexer: Lexer): Stmt[] | null {
         break;
       }
 
+      case Token.Break: {
+        const count = parseJumpWithLoopCount(lexer, enclosingLoopCount, "break");
+        stmts.push({range: spanSince(lexer, start), kind: {kind: 'Break', count}});
+        break;
+      }
+
+      case Token.Continue: {
+        const count = parseJumpWithLoopCount(lexer, enclosingLoopCount, "continue");
+        stmts.push({range: spanSince(lexer, start), kind: {kind: 'Continue', count}});
+        break;
+      }
+
       case Token.While: {
         advance(lexer);
         const test = parseExpr(lexer, LEVEL_LOWEST);
         if (test === null) return null;
-        const body = parseStmts(lexer);
+        const body = parseStmts(lexer, enclosingLoopCount + 1);
         if (body === null) return null;
         stmts.push({range: spanSince(lexer, start), kind: {kind: 'While', test, body}});
         break;
@@ -509,9 +523,9 @@ function parseStmts(lexer: Lexer): Stmt[] | null {
         advance(lexer);
         const test = parseExpr(lexer, LEVEL_LOWEST);
         if (test === null) return null;
-        const yes = parseStmts(lexer);
+        const yes = parseStmts(lexer, enclosingLoopCount);
         if (yes === null) return null;
-        const no = eat(lexer, Token.Else) ? parseStmts(lexer) : [];
+        const no = eat(lexer, Token.Else) ? parseStmts(lexer, enclosingLoopCount) : [];
         if (no === null) return null;
         stmts.push({range: spanSince(lexer, start), kind: {kind: 'If', test, yes, no}});
         break;
@@ -542,6 +556,27 @@ function parseStmts(lexer: Lexer): Stmt[] | null {
 
   if (!expect(lexer, Token.CloseBrace)) return null;
   return stmts;
+}
+
+function parseJumpWithLoopCount(lexer: Lexer, enclosingLoopCount: number, name: string): number {
+  const start = lexer.start;
+  let count = 1;
+  advance(lexer);
+
+  if (lexer.token === Token.Integer) {
+    count = +currentText(lexer);
+    advance(lexer);
+  }
+
+  if (enclosingLoopCount === 0) {
+    appendToLog(lexer.log, spanSince(lexer, start), `Cannot use "${name}" outside of a loop`);
+  }
+
+  else if (count < 1 || count > enclosingLoopCount) {
+    appendToLog(lexer.log, spanSince(lexer, start), `There is no enclosing loop with index ${count}`);
+  }
+
+  return count;
 }
 
 function parseParams(lexer: Lexer): ParamDecl[] | null {
@@ -615,7 +650,7 @@ export function parse(log: Log, text: string): Parsed | null {
           ? {range: currentRange(lexer), kind: {kind: 'Void'}}
           : parseType(lexer);
         if (ret === null) return null;
-        const body = parseStmts(lexer);
+        const body = parseStmts(lexer, 0);
         if (body === null) return null;
         defs.push({range: spanSince(lexer, start), name, nameRange, params, args, ret, body});
         break;

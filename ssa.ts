@@ -124,6 +124,10 @@ export function createBlock(graph: Graph): number {
   return graph.blocks.length - 1;
 }
 
+export function setJump(graph: Graph, block: number, jump: Jump): void {
+  graph.blocks[block].jump = jump;
+}
+
 export interface ValueRef {
   ref: InsRef;
 

@@ -1,6 +1,6 @@
 import { Log, Range, appendToLog } from './log';
 import { Parsed, TypeExpr, CtorDecl, DefDecl, Stmt, Expr } from './parser';
-import { Graph, RawType, createGraph, createLocal, ValueRef, createConstant, addLocalGet, Code, createBlock, addLocalSet } from './ssa';
+import { Graph, RawType, createGraph, createLocal, ValueRef, createConstant, addLocalGet, Code, createBlock, addLocalSet, setJump } from './ssa';
 
 interface TypeID {
   index: number;
@@ -37,6 +37,11 @@ type GlobalRef =
   {kind: 'Def', defID: number} |
   {kind: 'Var', varID: number};
 
+interface Loop {
+  continueTarget: number;
+  breakTarget: number;
+}
+
 interface Context {
   code: Code;
   log: Log;
@@ -44,7 +49,10 @@ interface Context {
   types: TypeData[];
   defs: DefData[];
   globalScope: {[name: string]: GlobalRef};
+
+  // Function-specific temporaries
   currentBlock: number;
+  loops: Loop[];
 
   // Built-in types
   errorTypeID: TypeID;
@@ -214,7 +222,9 @@ function compileDefs(context: Context, parsed: Parsed): void {
   }
 }
 
-function compileStmts(context: Context, stmts: Stmt[], graph: Graph, scope: Scope, retTypeID: TypeID): void {
+function compileStmts(context: Context, stmts: Stmt[], graph: Graph, parent: Scope, retTypeID: TypeID): void {
+  const scope = {parent, locals: {}};
+
   for (const stmt of stmts) {
     switch (stmt.kind.kind) {
       case 'Var': {
@@ -239,7 +249,7 @@ function compileStmts(context: Context, stmts: Stmt[], graph: Graph, scope: Scop
           initial = compileExpr(context, value, graph, scope, typeID);
         }
 
-        const local = defineLocal(context, graph, scope, stmt.kind.name, stmt.range, typeID);
+        const local = defineLocal(context, graph, scope, stmt.kind.name, stmt.kind.nameRange, typeID);
         addLocalSet(graph, context.currentBlock, local, initial.value);
         break;
       }
@@ -247,6 +257,26 @@ function compileStmts(context: Context, stmts: Stmt[], graph: Graph, scope: Scop
       case 'Return': {
         if (stmt.kind.value !== null) {
           const value = compileExpr(context, stmt.kind.value, graph, scope, retTypeID);
+        }
+        break;
+      }
+
+      case 'Break': {
+        const count = stmt.kind.count;
+        if (count >= 1 && count <= context.loops.length) {
+          const after = createBlock(graph);
+          setJump(graph, context.currentBlock, {kind: 'Goto', target: context.loops[count - 1].breakTarget});
+          context.currentBlock = after;
+        }
+        break;
+      }
+
+      case 'Continue': {
+        const count = stmt.kind.count;
+        if (count >= 1 && count <= context.loops.length) {
+          const after = createBlock(graph);
+          setJump(graph, context.currentBlock, {kind: 'Goto', target: context.loops[count - 1].continueTarget});
+          context.currentBlock = after;
         }
         break;
       }
@@ -259,8 +289,23 @@ function compileStmts(context: Context, stmts: Stmt[], graph: Graph, scope: Scop
       }
 
       case 'While': {
+        const header = createBlock(graph);
+        const body = createBlock(graph);
+        const after = createBlock(graph);
+
+        // Compile the test
+        setJump(graph, context.currentBlock, {kind: 'Goto', target: header});
+        context.currentBlock = header;
         const test = compileExpr(context, stmt.kind.test, graph, scope, context.boolTypeID);
+        setJump(graph, context.currentBlock, {kind: 'Branch', value: test.value.ref, yes: body, no: after});
+
+        // Compile the body
+        context.currentBlock = body;
+        context.loops.push({continueTarget: header, breakTarget: after});
         compileStmts(context, stmt.kind.body, graph, scope, retTypeID);
+        context.loops.pop();
+        setJump(graph, context.currentBlock, {kind: 'Goto', target: header});
+        context.currentBlock = after;
         break;
       }
 
@@ -585,7 +630,10 @@ export function compile(log: Log, parsed: Parsed, ptrType: RawType): Code {
     types: [],
     defs: [],
     globalScope: {},
+
+    // Function-specific temporaries
     currentBlock: -1,
+    loops: [],
 
     // Built-in types
     errorTypeID: {index: 0},
