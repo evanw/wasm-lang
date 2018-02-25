@@ -1,6 +1,6 @@
 import { Log, Range, appendToLog } from './log';
 import { Parsed, TypeExpr, CtorDecl, DefDecl, Stmt, Expr } from './parser';
-import { Graph, RawType, createGraph, createLocal, ValueRef, createConstant, addLocalGet, Code, createBlock } from './ssa';
+import { Graph, RawType, createGraph, createLocal, ValueRef, createConstant, addLocalGet, Code, createBlock, addLocalSet } from './ssa';
 
 interface TypeID {
   index: number;
@@ -218,8 +218,30 @@ function compileStmts(context: Context, stmts: Stmt[], graph: Graph, scope: Scop
   for (const stmt of stmts) {
     switch (stmt.kind.kind) {
       case 'Var': {
-        const typeID = resolveTypeExpr(context, stmt.kind.type);
-        const value = compileExpr(context, stmt.kind.value, graph, scope, typeID);
+        const type = stmt.kind.type;
+        const value = stmt.kind.value;
+        let typeID: TypeID;
+        let initial: Result;
+        let local: number;
+
+        if (type.kind.kind === 'Inferred') {
+          initial = compileExpr(context, value, graph, scope, null);
+          typeID = initial.typeID;
+
+          // Forbid creating variables of certain types
+          if (typeID === context.voidTypeID) {
+            appendToLog(context.log, stmt.range, `Cannot create a variable of type "${context.types[typeID.index].name}"`);
+            typeID = context.errorTypeID;
+          }
+        }
+
+        else {
+          typeID = resolveTypeExpr(context, type);
+          initial = compileExpr(context, value, graph, scope, typeID);
+        }
+
+        local = defineLocal(context, graph, scope, stmt.kind.name, stmt.range, typeID);
+        addLocalSet(graph, context.currentBlock, local, initial.value);
         break;
       }
 
@@ -244,12 +266,12 @@ function compileStmts(context: Context, stmts: Stmt[], graph: Graph, scope: Scop
       }
 
       case 'Assign': {
-        const value = compileExpr(context, stmt.kind.value, graph, scope, context.errorTypeID);
+        const value = compileExpr(context, stmt.kind.value, graph, scope, null);
         break;
       }
 
       case 'Expr':
-        compileExpr(context, stmt.kind.value, graph, scope, context.errorTypeID);
+        compileExpr(context, stmt.kind.value, graph, scope, null);
         break;
 
       default: {
@@ -310,7 +332,7 @@ function compileArgs(context: Context, range: Range, exprs: Expr[], graph: Graph
   return results;
 }
 
-function compileExpr(context: Context, expr: Expr, graph: Graph, scope: Scope, castTo: TypeID): Result {
+function compileExpr(context: Context, expr: Expr, graph: Graph, scope: Scope, castTo: TypeID | null): Result {
   let result = errorResult(context, graph);
 
   switch (expr.kind.kind) {
@@ -441,6 +463,10 @@ function compileExpr(context: Context, expr: Expr, graph: Graph, scope: Scope, c
     }
   }
 
+  if (castTo === null) {
+    return result;
+  }
+
   return cast(context, expr.range, result, castTo, graph);
 }
 
@@ -481,6 +507,12 @@ function findLocal(scope: Scope, name: string): Local | null {
   return null;
 }
 
+function rawTypeForTypeID(context: Context, typeID: TypeID): RawType {
+  if (typeID === context.voidTypeID) return RawType.Void;
+  if (typeID === context.boolTypeID || typeID === context.intTypeID) return RawType.I32;
+  return context.ptrType;
+}
+
 function defineLocal(context: Context, graph: Graph, scope: Scope, name: string, range: Range, typeID: TypeID): number {
   const local = findLocal(scope, name);
   if (local !== null) {
@@ -488,7 +520,7 @@ function defineLocal(context: Context, graph: Graph, scope: Scope, name: string,
     return local.index;
   }
 
-  const index = createLocal(graph, RawType.I32);
+  const index = createLocal(graph, rawTypeForTypeID(context, typeID));
   scope.locals[name] = {typeID, index};
   return index;
 }
