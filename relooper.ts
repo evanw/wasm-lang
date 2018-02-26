@@ -1,13 +1,13 @@
 // This file implements emscripten's relooper algorithm:
 // https://github.com/kripken/Relooper/blob/master/paper.pdf
 
-import { Code, RawType, Func, blockToString, refToString } from './ssa';
+import { Code, RawType, Func, blockToString, refToString, BasicBlock } from './ssa';
 import { assert } from './util';
 
 type BlockTree =
   {kind: 'Simple', block: number, next: BlockTree | null} |
-  {kind: 'Loop', body: BlockTree, next: BlockTree | null} |
-  {kind: 'Multiple', branches: [number, BlockTree][], next: BlockTree | null};
+  {kind: 'Loop', block: number, body: BlockTree, next: BlockTree | null} |
+  {kind: 'Multiple', block: number, branches: Map<number, BlockTree>, next: BlockTree | null};
 
 interface BlockData {
   isLoop: boolean;
@@ -50,14 +50,9 @@ function markLiveDFS(blocks: BlockData[], live: Set<number>, index: number): voi
   }
 }
 
-function handleMultipleEntries(blocks: BlockData[], entries: number[], live: Set<number>): BlockTree {
-  assert(entries.length > 0);
+function handleMultipleEntries(blocks: BlockData[], block: number, entries: number[], live: Set<number>): BlockTree {
+  assert(entries.length >= 2);
   assert(entries.every(entry => live.has(entry)));
-
-  // Special-case a single entry point
-  if (entries.length === 1) {
-    return handleSingleEntry(blocks, entries[0], live);
-  }
 
   // If there wasn't a single entry, partition the live blocks into those only
   // reachable from a single entry point and everything else
@@ -80,21 +75,20 @@ function handleMultipleEntries(blocks: BlockData[], entries: number[], live: Set
   }
 
   // The next blocks are all blocks not in any group
-  const nextEntries = new Set<number>();
+  const nextEntries: number[] = [];
   for (const index of nextLive) {
-    for (const edge of blocks[index].incoming) {
-      if (!nextLive.has(edge) && live.has(edge)) {
-        nextEntries.add(index);
-      }
+    if (blocks[index].incoming.some(edge => !nextLive.has(edge) && live.has(edge))) {
+      nextEntries.push(index);
     }
   }
+  assert(nextEntries.length < 2);
 
-  const branches: [number, BlockTree][] = [];
+  const branches = new Map<number, BlockTree>();
   for (const [entry, group] of groups) {
-    branches.push([entry, handleSingleEntry(blocks, entry, group)]);
+    branches.set(entry, handleSingleEntry(blocks, entry, group));
   }
-  const next = nextEntries.size > 0 ? handleMultipleEntries(blocks, [...nextEntries], nextLive) : null;
-  return {kind: 'Multiple', branches, next};
+  const next = nextEntries.length === 1 ? handleSingleEntry(blocks, nextEntries[0], nextLive) : null;
+  return {kind: 'Multiple', block, branches, next};
 }
 
 function handleSingleEntry(blocks: BlockData[], entry: number, live: Set<number>): BlockTree {
@@ -113,14 +107,17 @@ function handleSingleEntry(blocks: BlockData[], entry: number, live: Set<number>
 
   // Make a simple block if this isn't a loop
   if (backEdgeBlocks.size === 0) {
-    const nextEntries = new Set<number>();
+    const nextEntries: number[] = [];
     live.delete(entry);
     for (const edge of block.outgoing) {
       if (live.has(edge)) {
-        nextEntries.add(edge);
+        nextEntries.push(edge);
       }
     }
-    const next = nextEntries.size > 0 ? handleMultipleEntries(blocks, [...nextEntries], live) : null;
+    if (nextEntries.length >= 2) {
+      return handleMultipleEntries(blocks, entry, nextEntries, live);
+    }
+    const next = nextEntries.length === 1 ? handleSingleEntry(blocks, nextEntries[0], live) : null;
     return {kind: 'Simple', block: entry, next};
   }
 
@@ -146,19 +143,20 @@ function handleSingleEntry(blocks: BlockData[], entry: number, live: Set<number>
 
   // The next blocks are all blocks not in the body
   const nextLive = new Set<number>();
-  const nextEntries = new Set<number>();
+  const nextEntries: number[] = [];
   for (const index of live) {
     if (!bodyLive.has(index)) {
       nextLive.add(index);
       if (blocks[index].incoming.some(i => bodyLive.has(i))) {
-        nextEntries.add(index);
+        nextEntries.push(index);
       }
     }
   }
+  assert(nextEntries.length < 2);
 
   const body = handleSingleEntry(blocks, entry, bodyLive);
-  const next = nextEntries.size > 0 ? handleMultipleEntries(blocks, [...nextEntries], nextLive) : null;
-  return {kind: 'Loop', body, next};
+  const next = nextEntries.length === 1 ? handleSingleEntry(blocks, nextEntries[0], nextLive) : null;
+  return {kind: 'Loop', block: entry, body, next};
 }
 
 function markOwnerDFS(index: number, blocks: BlockData[], live: Set<number>, owners: Map<number, number | null>, owner: number | null): void {
@@ -204,6 +202,30 @@ export function codeToTreeString(code: Code): string {
   return text;
 }
 
+function jumpToString(code: Code, func: Func, block: BasicBlock, indent: string): string {
+  switch (block.jump.kind) {
+    case 'Missing':
+      return '';
+
+    case 'ReturnVoid':
+      return `${indent}return\n`;
+
+    case 'Return':
+      return `${indent}return ${refToString(func, block.jump.value)}\n`;
+
+    case 'Goto':
+      return `${indent}goto b${block.jump.target}\n`;
+
+    case 'Branch':
+      return `${indent}branch ${refToString(func, block.jump.value)} ? b${block.jump.yes} : b${block.jump.no}\n`;
+
+    default: {
+      const checkCovered: void = block.jump;
+      throw new Error('Internal error');
+    }
+  }
+}
+
 function treeToString(code: Code, func: Func, tree: BlockTree | null, indent: string): string {
   if (tree === null) return '';
   let text = '';
@@ -213,31 +235,7 @@ function treeToString(code: Code, func: Func, tree: BlockTree | null, indent: st
       const block = func.blocks[tree.block];
       text += `${indent}# b${tree.block}\n`;
       text += blockToString(code, func, block, indent);
-      switch (block.jump.kind) {
-        case 'Missing':
-          break;
-
-        case 'ReturnVoid':
-          text += `${indent}return\n`;
-          break;
-
-        case 'Return':
-          text += `${indent}return ${refToString(func, block.jump.value)}\n`;
-          break;
-
-        case 'Goto':
-          text += `${indent}goto b${block.jump.target}\n`;
-          break;
-
-        case 'Branch':
-          text += `${indent}branch ${refToString(func, block.jump.value)} ? b${block.jump.yes} : b${block.jump.no}\n`;
-          break;
-
-        default: {
-          const checkCovered: void = block.jump;
-          throw new Error('Internal error');
-        }
-      }
+      text += jumpToString(code, func, block, indent);
       break;
     }
 
@@ -249,6 +247,10 @@ function treeToString(code: Code, func: Func, tree: BlockTree | null, indent: st
     }
 
     case 'Multiple': {
+      const block = func.blocks[tree.block];
+      text += `${indent}# b${tree.block}\n`;
+      text += blockToString(code, func, block, indent);
+      text += jumpToString(code, func, block, indent);
       text += `${indent}multiple {\n`;
       for (const [entry, branch] of tree.branches) {
         text += `${indent}  branch b${entry} {\n`;
