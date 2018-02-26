@@ -548,6 +548,7 @@ function compileExpr(context: Context, expr: Expr, func: Func, scope: Scope, cas
         if (global.kind === 'Ctor') {
           const ctor = context.types[global.typeID.index].ctors[global.index];
           const args = compileArgs(context, expr.range, [], func, scope, ctor.args);
+          appendToLog(context.log, expr.range, `Constructors are not currently implemented`);
           result = {
             typeID: global.typeID,
             value: createConstant(func, 0),
@@ -675,6 +676,7 @@ function compileExpr(context: Context, expr: Expr, func: Func, scope: Scope, cas
       if (global.kind === 'Ctor') {
         const ctor = context.types[global.typeID.index].ctors[global.index];
         const args = compileArgs(context, expr.range, expr.kind.args, func, scope, ctor.args);
+        appendToLog(context.log, expr.range, `Constructors are not currently implemented`);
         result = {
           typeID: global.typeID,
           value: createConstant(func, 0),
