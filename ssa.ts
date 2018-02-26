@@ -298,7 +298,6 @@ interface ToStringContext {
   code: Code;
   func: Func;
   stack: number[];
-  loopHeaders: Set<number>;
 }
 
 export function codeToString(code: Code): string {
@@ -309,49 +308,16 @@ export function codeToString(code: Code): string {
       code,
       func,
       stack: [],
-      loopHeaders: new Set(),
     };
     const args = func.argTypes.map((arg, i) => `v${i} ${RawType[arg]}`).join(', ');
     text += `def ${func.name}(${args}) ${RawType[func.retType]}\n`;
     for (let i = 0; i < func.locals.length; i++) {
       text += `  v${i} ${RawType[func.locals[i]]}\n`;
     }
-    findLoopHeaders(func, 0, context.loopHeaders);
     text += blockTreeToString(context, 0, '  ');
   }
 
   return text;
-}
-
-function findLoopHeaders(func: Func, index: number, loopHeaders: Set<number>): void {
-  while (index !== -1) {
-    const block = func.blocks[index];
-
-    switch (block.jump.kind) {
-      case 'Goto':
-        checkJumpTarget(func, block.jump.target, loopHeaders);
-        break;
-
-      case 'Branch':
-        checkJumpTarget(func, block.jump.yes, loopHeaders);
-        checkJumpTarget(func, block.jump.no, loopHeaders);
-        break;
-    }
-
-    index = block.next;
-  }
-}
-
-function checkJumpTarget(func: Func, jump: JumpTarget, loopHeaders: Set<number>): void {
-  switch (jump.kind) {
-    case 'Child':
-      findLoopHeaders(func, jump.index, loopHeaders);
-      break;
-
-    case 'Loop':
-      loopHeaders.add(jump.parent);
-      break;
-  }
 }
 
 function blockTreeToString(context: ToStringContext, index: number, indent: string): string {
@@ -360,13 +326,7 @@ function blockTreeToString(context: ToStringContext, index: number, indent: stri
   while (index !== -1) {
     const block = context.func.blocks[index];
     context.stack.push(index);
-
-    if (context.loopHeaders.has(index)) {
-      text += `${indent}l${context.stack.length - 1}: { # loop\n`;
-    } else {
-      text += `${indent}l${context.stack.length - 1}: {\n`;
-    }
-
+    text += `${indent}l${context.stack.length - 1}: {\n`;
     indent += '  ';
     text += `${indent}# b${index}\n`;
     text += blockToString(context, block, indent);
