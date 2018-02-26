@@ -2,10 +2,12 @@ import { Log, logToString } from './log';
 import { parse } from './parser';
 import { RawType, codeToString } from './ssa';
 import { compile } from './compiler';
+import { encodeWASM } from './wasm';
 
 declare function require(name: string): any;
+declare const WebAssembly: any;
 
-export function main(): void {
+export async function main(): Promise<void> {
   const source = require('fs').readFileSync('example.txt', 'utf8');
   const log: Log = {messages: []};
   const parsed = parse(log, source);
@@ -16,6 +18,9 @@ export function main(): void {
     console.log(logToString(source, log));
   } else if (code !== null) {
     console.log(codeToString(code));
+    const wasm = encodeWASM(code);
+    const {instance} = await WebAssembly.instantiate(wasm);
+    console.log(instance);
   } else {
     console.log('done');
   }
