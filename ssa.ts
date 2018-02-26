@@ -177,12 +177,12 @@ export function addLocalSet(func: Func, block: number, local: number, value: Val
   return addIns(func, block, {kind: 'LocalSet', local, value: ref});
 }
 
-function refToString(func: Func, ref: InsRef): string {
+export function refToString(func: Func, ref: InsRef): string {
   if (ref.index >= 0) return `t${ref.index}`;
   return func.constants[~ref.index].toString();
 }
 
-function blockToString(code: Code, func: Func, block: BasicBlock, indent: string): string {
+export function blockToString(code: Code, func: Func, block: BasicBlock, indent: string): string {
   let text = '';
 
   for (let i = 0; i < block.insList.length; i++) {
