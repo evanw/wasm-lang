@@ -1,6 +1,6 @@
 import { Log, Range, appendToLog } from './log';
-import { Parsed, TypeExpr, CtorDecl, DefDecl, Stmt, Expr } from './parser';
-import { Func, RawType, createFunc, createLocal, ValueRef, createConstant, addLocalGet, Code, createBlock, addLocalSet, setJump, addIns, InsRef, unwrapRef } from './ssa';
+import { Parsed, TypeExpr, CtorDecl, DefDecl, Stmt, Expr, BinOp } from './parser';
+import { Func, RawType, createFunc, createLocal, ValueRef, createConstant, addLocalGet, Code, createBlock, addLocalSet, setJump, addIns, InsRef, unwrapRef, setNext } from './ssa';
 
 interface TypeID {
   index: number;
@@ -36,11 +36,6 @@ type GlobalRef =
   {kind: 'Def', defID: number} |
   {kind: 'Var', varID: number};
 
-interface Loop {
-  continueTarget: number;
-  breakTarget: number;
-}
-
 interface Context {
   code: Code;
   log: Log;
@@ -51,7 +46,7 @@ interface Context {
 
   // Function-specific temporaries
   currentBlock: number;
-  loops: Loop[];
+  loops: number[];
 
   // Built-in types
   errorTypeID: TypeID;
@@ -288,7 +283,7 @@ function compileStmts(context: Context, stmts: Stmt[], func: Func, parent: Scope
         // The parser handles out-of-bounds error reporting
         if (count >= 1 && count <= context.loops.length) {
           const after = createBlock(func);
-          setJump(func, context.currentBlock, {kind: 'Goto', target: context.loops[count - 1].breakTarget});
+          setJump(func, context.currentBlock, {kind: 'Goto', target: {kind: 'Next', parent: context.loops[count - 1]}});
           context.currentBlock = after;
         }
         break;
@@ -300,7 +295,7 @@ function compileStmts(context: Context, stmts: Stmt[], func: Func, parent: Scope
         // The parser handles out-of-bounds error reporting
         if (count >= 1 && count <= context.loops.length) {
           const after = createBlock(func);
-          setJump(func, context.currentBlock, {kind: 'Goto', target: context.loops[count - 1].continueTarget});
+          setJump(func, context.currentBlock, {kind: 'Goto', target: {kind: 'Loop', parent: context.loops[count - 1]}});
           context.currentBlock = after;
         }
         break;
@@ -309,57 +304,85 @@ function compileStmts(context: Context, stmts: Stmt[], func: Func, parent: Scope
       case 'If': {
         // Compile the test
         const test = compileExpr(context, stmt.kind.test, func, scope, context.boolTypeID);
+        const parent = context.currentBlock;
         const yes = createBlock(func);
-        const after = createBlock(func);
 
         // Without an else
         if (stmt.kind.no.length === 0) {
-          setJump(func, context.currentBlock, {kind: 'Branch', value: test.value.ref, yes, no: after});
+          setJump(func, parent, {
+            kind: 'Branch',
+            value: test.value.ref,
+            yes: {kind: 'Child', index: yes},
+            no: {kind: 'Next', parent},
+          });
 
           // Then branch
           context.currentBlock = yes;
           compileStmts(context, stmt.kind.yes, func, scope, retTypeID);
-          setJump(func, context.currentBlock, {kind: 'Goto', target: after});
+          setJump(func, context.currentBlock, {kind: 'Goto', target: {kind: 'Next', parent}});
         }
 
         // With an else
         else {
           const no = createBlock(func);
-          setJump(func, context.currentBlock, {kind: 'Branch', value: test.value.ref, yes, no});
+          setJump(func, parent, {
+            kind: 'Branch',
+            value: test.value.ref,
+            yes: {kind: 'Child', index: yes},
+            no: {kind: 'Child', index: no},
+          });
 
           // Then branch
           context.currentBlock = yes;
           compileStmts(context, stmt.kind.yes, func, scope, retTypeID);
-          setJump(func, context.currentBlock, {kind: 'Goto', target: after});
+          setJump(func, context.currentBlock, {kind: 'Goto', target: {kind: 'Next', parent}});
 
           // Else branch
           context.currentBlock = no;
           compileStmts(context, stmt.kind.no, func, scope, retTypeID);
-          setJump(func, context.currentBlock, {kind: 'Goto', target: after});
+          setJump(func, context.currentBlock, {kind: 'Goto', target: {kind: 'Next', parent}});
         }
 
-        context.currentBlock = after;
+        // Merge the control flow for following statements
+        const next = createBlock(func);
+        setNext(func, parent, next);
+        context.currentBlock = next;
         break;
       }
 
       case 'While': {
+        const previous = context.currentBlock;
+        const loop = createBlock(func);
+
+        // Create the loop header
         const header = createBlock(func);
-        const body = createBlock(func);
-        const after = createBlock(func);
+        setJump(func, previous, {kind: 'Goto', target: {kind: 'Next', parent: previous}});
+        setNext(func, previous, loop);
+        setJump(func, loop, {kind: 'Goto', target: {kind: 'Child', index: header}});
+        context.currentBlock = header;
 
         // Compile the test
-        setJump(func, context.currentBlock, {kind: 'Goto', target: header});
-        context.currentBlock = header;
         const test = compileExpr(context, stmt.kind.test, func, scope, context.boolTypeID);
-        setJump(func, context.currentBlock, {kind: 'Branch', value: test.value.ref, yes: body, no: after});
+        setJump(func, context.currentBlock, {
+          kind: 'Branch',
+          value: test.value.ref,
+          yes: {kind: 'Next', parent: context.currentBlock},
+          no: {kind: 'Next', parent: loop},
+        });
 
         // Compile the body
+        const body = createBlock(func);
+        setNext(func, context.currentBlock, body);
         context.currentBlock = body;
-        context.loops.push({continueTarget: header, breakTarget: after});
+        context.loops.push(loop);
         compileStmts(context, stmt.kind.body, func, scope, retTypeID);
         context.loops.pop();
-        setJump(func, context.currentBlock, {kind: 'Goto', target: header});
-        context.currentBlock = after;
+        setJump(func, context.currentBlock, {kind: 'Goto', target: {kind: 'Loop', parent: loop}});
+
+        // Merge the control flow for following statements
+        const next = createBlock(func);
+        setNext(func, loop, next);
+        context.currentBlock = next;
         break;
       }
 
@@ -524,7 +547,48 @@ function compileExpr(context: Context, expr: Expr, func: Func, scope: Scope, cas
       break;
 
     case 'Binary':
-      appendToLog(context.log, expr.range, `Binary operators are not currently implemented`);
+      switch (expr.kind.op) {
+        case BinOp.And: {
+          // Compile the left
+          const local = createLocal(func, RawType.I32);
+          const left = compileExpr(context, expr.kind.left, func, scope, context.boolTypeID);
+          const leftEnd = context.currentBlock;
+          addLocalSet(func, leftEnd, local, left.value);
+
+          // Skip the right if true
+          const rightStart = createBlock(func);
+          const next = createBlock(func);
+          setJump(func, leftEnd, {
+            kind: 'Branch',
+            value: left.value.ref,
+            yes: {kind: 'Next', parent: leftEnd},
+            no: {kind: 'Child', index: rightStart},
+          });
+          setNext(func, leftEnd, next);
+
+          // Otherwise evaluate the right
+          context.currentBlock = rightStart;
+          const right = compileExpr(context, expr.kind.right, func, scope, context.boolTypeID);
+          const rightEnd = context.currentBlock;
+          addLocalSet(func, rightEnd, local, right.value);
+          setJump(func, rightEnd, {
+            kind: 'Goto',
+            target: {kind: 'Next', parent: leftEnd},
+          });
+
+          // Merge the control flow for following expressions
+          context.currentBlock = next;
+          result = {
+            typeID: context.boolTypeID,
+            value: addLocalGet(func, context.currentBlock, local),
+          };
+          break;
+        }
+
+        default:
+          appendToLog(context.log, expr.range, `${BinOp[expr.kind.op]} is not currently implemented`);
+          break;
+      }
       break;
 
     case 'Call': {

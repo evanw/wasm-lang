@@ -48,16 +48,49 @@ export type Ins =
   {kind: 'Div32S', left: InsRef, right: InsRef} |
   {kind: 'Div32U', left: InsRef, right: InsRef};
 
+// Unlike in other compilers, BasicBlocks form a tree instead of a block soup.
+// This makes it possible to emit the structured output that WebAssembly
+// requires. Reverse-engineering the structure from the block soup is possible
+// but is unnecessary if the compiler preserves the structure in the first
+// place.
+//
+// This structure preservation is done by restricting jump targets to either
+// the next block, a child block, the next block of a parent, or a loop header.
 export type Jump =
-  {kind: 'Missing'} |
   {kind: 'ReturnVoid'} |
-  {kind: 'Goto', target: number} |
   {kind: 'Return', value: InsRef} |
-  {kind: 'Branch', value: InsRef, yes: number, no: number};
+
+  // This is the initial jump value for newly-created blocks. It's used to
+  // detect missing jumps when the user forgets a return statement.
+  {kind: 'Missing'} |
+
+  // These instructions allow for branching to a child, a parent, or to this
+  // block (forming a loop).
+  {kind: 'Goto', target: JumpTarget} |
+  {kind: 'Branch', value: InsRef, yes: JumpTarget, no: JumpTarget};
+
+type JumpTarget =
+  // This jumps to a child, which means this block is the child block's parent.
+  {kind: 'Child', index: number} |
+
+  // This jumps to the "next" field of the parent with the provided index. The
+  // parent must be currently on the stack during the DFS from the entry point
+  // to this block.
+  {kind: 'Next', parent: number} |
+
+  // This jumps back to the parent with the provided index. This is the only
+  // jump that forms a back edge.
+  {kind: 'Loop', parent: number};
 
 export interface BasicBlock {
   insList: Ins[];
   jump: Jump;
+
+  // This is the index of the next basic block in the basic block tree. It will
+  // be -1 if there's no such block (e.g. if this is the last branch inside a
+  // loop body). Note that control flow doesn't necessarily transfer into this
+  // block at all (e.g. a loop body with a return statement).
+  next: number;
 
   // This maps the index of a local to the InsRef for this block that is known
   // to already hold the value for that local. That way we can avoid needlessly
@@ -119,6 +152,7 @@ export function createBlock(func: Func): number {
   func.blocks.push({
     insList: [],
     jump: {kind: 'Missing'},
+    next: -1,
     previousLocals: new Map(),
     spills: new Map(),
   });
@@ -127,6 +161,11 @@ export function createBlock(func: Func): number {
 
 export function setJump(func: Func, block: number, jump: Jump): void {
   func.blocks[block].jump = jump;
+}
+
+export function setNext(func: Func, block: number, next: number): void {
+  assert(next >= -1 && next < func.blocks.length);
+  func.blocks[block].next = next;
 }
 
 export interface ValueRef {
@@ -177,12 +216,12 @@ export function addLocalSet(func: Func, block: number, local: number, value: Val
   return addIns(func, block, {kind: 'LocalSet', local, value: ref});
 }
 
-export function refToString(func: Func, ref: InsRef): string {
+function refToString(func: Func, ref: InsRef): string {
   if (ref.index >= 0) return `t${ref.index}`;
   return func.constants[~ref.index].toString();
 }
 
-export function blockToString(code: Code, func: Func, block: BasicBlock, indent: string): string {
+function blockToString(context: ToStringContext, block: BasicBlock, indent: string): string {
   let text = '';
 
   for (let i = 0; i < block.insList.length; i++) {
@@ -193,13 +232,13 @@ export function blockToString(code: Code, func: Func, block: BasicBlock, indent:
         break;
 
       case 'Alias':
-        text += `${indent}t${i} = ${refToString(func, ins.value)}\n`;
+        text += `${indent}t${i} = ${refToString(context.func, ins.value)}\n`;
         break;
 
       case 'Call': {
-        const args = [code.funcs[ins.index].name];
+        const args = [context.code.funcs[ins.index].name];
         for (const arg of ins.args) {
-          args.push(refToString(func, arg));
+          args.push(refToString(context.func, arg));
         }
         text += `${indent}t${i} = call ${args.join(', ')}\n`;
         break;
@@ -221,15 +260,15 @@ export function blockToString(code: Code, func: Func, block: BasicBlock, indent:
         break;
 
       case 'LocalSet':
-        text += `${indent}v${ins.local} = ${refToString(func, ins.value)}\n`;
+        text += `${indent}v${ins.local} = ${refToString(context.func, ins.value)}\n`;
         break;
 
       case 'Retain':
-        text += `${indent}retain ${refToString(func, ins.ptr)}\n`;
+        text += `${indent}retain ${refToString(context.func, ins.ptr)}\n`;
         break;
 
       case 'Release':
-        text += `${indent}release ${refToString(func, ins.ptr)}, ${code.funcs[ins.dtor].name}\n`;
+        text += `${indent}release ${refToString(context.func, ins.ptr)}, ${context.code.funcs[ins.dtor].name}\n`;
         break;
 
       case 'Eq32':
@@ -255,54 +294,146 @@ export function blockToString(code: Code, func: Func, block: BasicBlock, indent:
   return text;
 }
 
+interface ToStringContext {
+  code: Code;
+  func: Func;
+  stack: number[];
+  loopHeaders: Set<number>;
+}
+
 export function codeToString(code: Code): string {
   let text = '';
 
   for (const func of code.funcs) {
+    const context: ToStringContext = {
+      code,
+      func,
+      stack: [],
+      loopHeaders: new Set(),
+    };
     const args = func.argTypes.map((arg, i) => `v${i} ${RawType[arg]}`).join(', ');
-    const blocks = func.blocks;
     text += `def ${func.name}(${args}) ${RawType[func.retType]}\n`;
-
-    text += '  locals:\n';
     for (let i = 0; i < func.locals.length; i++) {
-      text += `    v${i} ${RawType[func.locals[i]]}\n`;
+      text += `  v${i} ${RawType[func.locals[i]]}\n`;
     }
-
-    for (let i = 0; i < blocks.length; i++) {
-      const block = blocks[i];
-      text += `  b${i}:\n`;
-      text += blockToString(code, func, block, '    ');
-
-      switch (block.jump.kind) {
-        case 'Missing':
-          text += '    (missing)\n';
-          break;
-
-        case 'ReturnVoid':
-          text += '    return\n';
-          break;
-
-        case 'Return':
-          text += `    return ${refToString(func, block.jump.value)}\n`;
-          break;
-
-        case 'Goto':
-          text += `    goto b${block.jump.target}\n`;
-          break;
-
-        case 'Branch':
-          text += `    branch ${refToString(func, block.jump.value)} ? b${block.jump.yes} : b${block.jump.no}\n`;
-          break;
-
-        default: {
-          const checkCovered: void = block.jump;
-          throw new Error('Internal error');
-        }
-      }
-    }
+    findLoopHeaders(func, 0, context.loopHeaders);
+    text += blockTreeToString(context, 0, '  ');
   }
 
   return text;
+}
+
+function findLoopHeaders(func: Func, index: number, loopHeaders: Set<number>): void {
+  while (index !== -1) {
+    const block = func.blocks[index];
+
+    switch (block.jump.kind) {
+      case 'Goto':
+        checkJumpTarget(func, block.jump.target, loopHeaders);
+        break;
+
+      case 'Branch':
+        checkJumpTarget(func, block.jump.yes, loopHeaders);
+        checkJumpTarget(func, block.jump.no, loopHeaders);
+        break;
+    }
+
+    index = block.next;
+  }
+}
+
+function checkJumpTarget(func: Func, jump: JumpTarget, loopHeaders: Set<number>): void {
+  switch (jump.kind) {
+    case 'Child':
+      findLoopHeaders(func, jump.index, loopHeaders);
+      break;
+
+    case 'Loop':
+      loopHeaders.add(jump.parent);
+      break;
+  }
+}
+
+function blockTreeToString(context: ToStringContext, index: number, indent: string): string {
+  let text = '';
+
+  while (index !== -1) {
+    const block = context.func.blocks[index];
+    context.stack.push(index);
+
+    if (context.loopHeaders.has(index)) {
+      text += `${indent}l${context.stack.length - 1}: { # loop\n`;
+    } else {
+      text += `${indent}l${context.stack.length - 1}: {\n`;
+    }
+
+    indent += '  ';
+    text += `${indent}# b${index}\n`;
+    text += blockToString(context, block, indent);
+
+    switch (block.jump.kind) {
+      case 'Missing':
+        text += `${indent}(missing jump)\n`;
+        break;
+
+      case 'ReturnVoid':
+        text += `${indent}return\n`;
+        break;
+
+      case 'Return':
+        text += `${indent}return ${refToString(context.func, block.jump.value)}\n`;
+        break;
+
+      case 'Goto': {
+        text += jumpTargetToString(context, block.jump.target, indent);
+        break;
+      }
+
+      case 'Branch': {
+        text += `${indent}if ${refToString(context.func, block.jump.value)}\n`;
+        text += jumpTargetToString(context, block.jump.yes, indent + '  ');
+        text += `${indent}else\n`;
+        text += jumpTargetToString(context, block.jump.no, indent + '  ');
+        break;
+      }
+
+      default: {
+        const checkCovered: void = block.jump;
+        throw new Error('Internal error');
+      }
+    }
+
+    indent = indent.slice(2);
+    text += `${indent}}\n`;
+    context.stack.pop();
+    index = block.next;
+  }
+
+  return text;
+}
+
+function jumpTargetToString(context: ToStringContext, target: JumpTarget, indent: string): string {
+  switch (target.kind) {
+    case 'Child':
+      return blockTreeToString(context, target.index, indent);
+
+    case 'Next': {
+      const index = context.stack.indexOf(target.parent);
+      assert(index !== -1);
+      return `${indent}break l${index} # b${target.parent}\n`;
+    }
+
+    case 'Loop': {
+      const index = context.stack.indexOf(target.parent);
+      assert(index !== -1);
+      return `${indent}continue l${index} # b${target.parent}\n`;
+    }
+
+    default: {
+      const checkCovered: void = target;
+      throw new Error('Internal error');
+    }
+  }
 }
 
 function spillToLocal(func: Func, block: number, ref: InsRef): number {

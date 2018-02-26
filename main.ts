@@ -2,7 +2,6 @@ import { Log, logToString } from './log';
 import { parse } from './parser';
 import { RawType, codeToString } from './ssa';
 import { compile } from './compiler';
-import { codeToTreeString } from './relooper';
 
 declare function require(name: string): any;
 
@@ -17,7 +16,6 @@ export function main(): void {
     console.log(logToString(source, log));
   } else if (code !== null) {
     console.log(codeToString(code));
-    console.log(codeToTreeString(code));
   } else {
     console.log('done');
   }
