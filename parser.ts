@@ -75,8 +75,9 @@ export interface Expr {
 }
 
 export enum UnOp {
-  Not,
+  Cpl,
   Neg,
+  Not,
 }
 
 export enum BinOp {
@@ -92,6 +93,9 @@ export enum BinOp {
   GtEq,
   And,
   Or,
+  BitAnd,
+  BitOr,
+  BitXor,
 }
 
 export type ExprKind =
@@ -235,6 +239,13 @@ function parsePrefix(lexer: Lexer): Expr | null {
       return {range: spanSince(lexer, start), kind: {kind: 'String', value}};
     }
 
+    case Token.Tilde: {
+      advance(lexer);
+      const value = parseExpr(lexer, LEVEL_PREFIX);
+      if (value === null) return null;
+      return {range: spanSince(lexer, start), kind: {kind: 'Unary', op: UnOp.Cpl, value}};
+    }
+
     case Token.ExclamationMark: {
       advance(lexer);
       const value = parseExpr(lexer, LEVEL_PREFIX);
@@ -287,13 +298,16 @@ function parsePrefix(lexer: Lexer): Expr | null {
 }
 
 const LEVEL_LOWEST = 0;
-const LEVEL_LOGICAL_OR = 1;
-const LEVEL_LOGICAL_AND = 2;
-const LEVEL_EQUALITY = 3;
-const LEVEL_COMPARE = 4;
-const LEVEL_ADD = 5;
-const LEVEL_MULTIPLY = 6;
-const LEVEL_PREFIX = 7;
+const LEVEL_OR = 1;
+const LEVEL_AND = 2;
+const LEVEL_BIT_OR = 3;
+const LEVEL_BIT_XOR = 4;
+const LEVEL_BIT_AND = 5;
+const LEVEL_EQUALITY = 6;
+const LEVEL_COMPARE = 7;
+const LEVEL_ADD = 8;
+const LEVEL_MULTIPLY = 9;
+const LEVEL_PREFIX = 10;
 
 function parseBinary(lexer: Lexer, left: Expr, op: BinOp, level: number): Expr | null {
   advance(lexer);
@@ -311,14 +325,14 @@ function parseExpr(lexer: Lexer, level: number): Expr | null {
 
     switch (lexer.token!) {
       case Token.BarBar: {
-        if (level >= LEVEL_LOGICAL_OR) return left;
-        left = parseBinary(lexer, left, BinOp.Or, LEVEL_LOGICAL_OR);
+        if (level >= LEVEL_OR) return left;
+        left = parseBinary(lexer, left, BinOp.Or, LEVEL_OR);
         break;
       }
 
       case Token.AmpersandAmpersand: {
-        if (level >= LEVEL_LOGICAL_AND) return left;
-        left = parseBinary(lexer, left, BinOp.And, LEVEL_LOGICAL_AND);
+        if (level >= LEVEL_AND) return left;
+        left = parseBinary(lexer, left, BinOp.And, LEVEL_AND);
         break;
       }
 
@@ -379,6 +393,24 @@ function parseExpr(lexer: Lexer, level: number): Expr | null {
       case Token.Slash: {
         if (level >= LEVEL_MULTIPLY) return left;
         left = parseBinary(lexer, left, BinOp.Div, LEVEL_MULTIPLY);
+        break;
+      }
+
+      case Token.Ampersand: {
+        if (level >= LEVEL_BIT_AND) return left;
+        left = parseBinary(lexer, left, BinOp.BitAnd, LEVEL_BIT_AND);
+        break;
+      }
+
+      case Token.Bar: {
+        if (level >= LEVEL_BIT_OR) return left;
+        left = parseBinary(lexer, left, BinOp.BitOr, LEVEL_BIT_OR);
+        break;
+      }
+
+      case Token.Caret: {
+        if (level >= LEVEL_BIT_XOR) return left;
+        left = parseBinary(lexer, left, BinOp.BitXor, LEVEL_BIT_XOR);
         break;
       }
 

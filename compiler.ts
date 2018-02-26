@@ -1,8 +1,7 @@
 import { Log, Range, appendToLog } from './log';
-import { Parsed, TypeExpr, CtorDecl, DefDecl, Stmt, Expr, BinOp } from './parser';
+import { Parsed, TypeExpr, CtorDecl, DefDecl, Stmt, Expr, BinOp, UnOp } from './parser';
 import { Func, RawType, createFunc, createLocal, ValueRef, createConstant, addLocalGet,
   Code, createBlock, addLocalSet, setJump, addIns, InsRef, unwrapRef, setNext, Ins } from './ssa';
-import { assert } from './util';
 
 interface TypeID {
   index: number;
@@ -545,11 +544,58 @@ function compileExpr(context: Context, expr: Expr, func: Func, scope: Scope, cas
       break;
 
     case 'Unary':
-      appendToLog(context.log, expr.range, `Unary operators are not currently implemented`);
+      switch (expr.kind.op) {
+        case UnOp.Cpl: {
+          const value = compileExpr(context, expr.kind.value, func, scope, context.intTypeID);
+          result = {
+            typeID: context.intTypeID,
+            value: addIns(func, context.currentBlock, {
+              kind: 'Xor32',
+              left: unwrapRef(func, context.currentBlock, value.value),
+              right: createConstant(func, -1).ref,
+            }),
+          };
+          break;
+        }
+
+        case UnOp.Neg: {
+          const value = compileExpr(context, expr.kind.value, func, scope, context.intTypeID);
+          result = {
+            typeID: context.intTypeID,
+            value: addIns(func, context.currentBlock, {
+              kind: 'Sub32',
+              left: createConstant(func, 0).ref,
+              right: unwrapRef(func, context.currentBlock, value.value),
+            }),
+          };
+          break;
+        }
+
+        case UnOp.Not: {
+          const value = compileExpr(context, expr.kind.value, func, scope, context.boolTypeID);
+          result = {
+            typeID: context.boolTypeID,
+            value: addIns(func, context.currentBlock, {
+              kind: 'Eq32',
+              left: unwrapRef(func, context.currentBlock, value.value),
+              right: createConstant(func, 0).ref,
+            }),
+          };
+          break;
+        }
+
+        default: {
+          const checkCovered: void = expr.kind.op;
+          throw new Error('Internal error');
+        }
+      }
       break;
 
     case 'Binary':
       switch (expr.kind.op) {
+        case BinOp.BitAnd:
+        case BinOp.BitOr:
+        case BinOp.BitXor:
         case BinOp.Add:
         case BinOp.Sub:
         case BinOp.Mul:
@@ -749,6 +795,9 @@ function compileMath32(context: Context, func: Func, scope: Scope, op: BinOp, le
   let ins: Ins;
 
   switch (op) {
+    case BinOp.BitOr: ins = {kind: 'Or32', left, right}; break;
+    case BinOp.BitXor: ins = {kind: 'Xor32', left, right}; break;
+    case BinOp.BitAnd: ins = {kind: 'And32', left, right}; break;
     case BinOp.Add: ins = {kind: 'Add32', left, right}; break;
     case BinOp.Sub: ins = {kind: 'Sub32', left, right}; break;
     case BinOp.Mul: ins = {kind: 'Mul32', left, right}; break;

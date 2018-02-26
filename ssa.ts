@@ -42,6 +42,9 @@ export type Ins =
   {kind: 'LtEq32S', left: InsRef, right: InsRef} |
   {kind: 'LtEq32U', left: InsRef, right: InsRef} |
 
+  {kind: 'And32', left: InsRef, right: InsRef} |
+  {kind: 'Or32', left: InsRef, right: InsRef} |
+  {kind: 'Xor32', left: InsRef, right: InsRef} |
   {kind: 'Add32', left: InsRef, right: InsRef} |
   {kind: 'Sub32', left: InsRef, right: InsRef} |
   {kind: 'Mul32', left: InsRef, right: InsRef} |
@@ -271,49 +274,20 @@ function blockToString(context: ToStringContext, block: BasicBlock, indent: stri
         text += `${indent}release ${refToString(context.func, ins.ptr)}, ${context.code.funcs[ins.dtor].name}\n`;
         break;
 
-      case 'Eq32':
-        text += `${indent}t${i} = i32.eq ${refToString(context.func, ins.left)}, ${refToString(context.func, ins.right)}\n`;
-        break;
-
-      case 'NotEq32':
-        text += `${indent}t${i} = i32.ne ${refToString(context.func, ins.left)}, ${refToString(context.func, ins.right)}\n`;
-        break;
-
-      case 'Lt32S':
-        text += `${indent}t${i} = i32.lt_s ${refToString(context.func, ins.left)}, ${refToString(context.func, ins.right)}\n`;
-        break;
-
-      case 'Lt32U':
-        text += `${indent}t${i} = i32.lt_u ${refToString(context.func, ins.left)}, ${refToString(context.func, ins.right)}\n`;
-        break;
-
-      case 'LtEq32S':
-        text += `${indent}t${i} = i32.lte_s ${refToString(context.func, ins.left)}, ${refToString(context.func, ins.right)}\n`;
-        break;
-
-      case 'LtEq32U':
-        text += `${indent}t${i} = i32.lte_u ${refToString(context.func, ins.left)}, ${refToString(context.func, ins.right)}\n`;
-        break;
-
-      case 'Add32':
-        text += `${indent}t${i} = i32.add ${refToString(context.func, ins.left)}, ${refToString(context.func, ins.right)}\n`;
-        break;
-
-      case 'Sub32':
-        text += `${indent}t${i} = i32.sub ${refToString(context.func, ins.left)}, ${refToString(context.func, ins.right)}\n`;
-        break;
-
-      case 'Mul32':
-        text += `${indent}t${i} = i32.mul ${refToString(context.func, ins.left)}, ${refToString(context.func, ins.right)}\n`;
-        break;
-
-      case 'Div32S':
-        text += `${indent}t${i} = i32.div_s ${refToString(context.func, ins.left)}, ${refToString(context.func, ins.right)}\n`;
-        break;
-
-      case 'Div32U':
-        text += `${indent}t${i} = i32.div_u ${refToString(context.func, ins.left)}, ${refToString(context.func, ins.right)}\n`;
-        break;
+      case 'Eq32': text += binaryToString(context, i, 'i32.eq', indent, ins.left, ins.right); break;
+      case 'NotEq32': text += binaryToString(context, i, 'i32.ne', indent, ins.left, ins.right); break;
+      case 'Lt32S': text += binaryToString(context, i, 'i32.lt_s', indent, ins.left, ins.right); break;
+      case 'Lt32U': text += binaryToString(context, i, 'i32.lt_u', indent, ins.left, ins.right); break;
+      case 'LtEq32S': text += binaryToString(context, i, 'i32.lte_s', indent, ins.left, ins.right); break;
+      case 'LtEq32U': text += binaryToString(context, i, 'i32.lte_u', indent, ins.left, ins.right); break;
+      case 'And32': text += binaryToString(context, i, 'i32.and', indent, ins.left, ins.right); break;
+      case 'Or32': text += binaryToString(context, i, 'i32.or', indent, ins.left, ins.right); break;
+      case 'Xor32': text += binaryToString(context, i, 'i32.xor', indent, ins.left, ins.right); break;
+      case 'Add32': text += binaryToString(context, i, 'i32.add', indent, ins.left, ins.right); break;
+      case 'Sub32': text += binaryToString(context, i, 'i32.sub', indent, ins.left, ins.right); break;
+      case 'Mul32': text += binaryToString(context, i, 'i32.mul', indent, ins.left, ins.right); break;
+      case 'Div32S': text += binaryToString(context, i, 'i32.div_s', indent, ins.left, ins.right); break;
+      case 'Div32U': text += binaryToString(context, i, 'i32.div_u', indent, ins.left, ins.right); break;
 
       default: {
         const checkCovered: void = ins;
@@ -323,6 +297,10 @@ function blockToString(context: ToStringContext, block: BasicBlock, indent: stri
   }
 
   return text;
+}
+
+function binaryToString(context: ToStringContext, i: number, name: string, indent: string, left: InsRef, right: InsRef): string {
+  return `${indent}t${i} = ${name} ${refToString(context.func, left)}, ${refToString(context.func, right)}\n`;
 }
 
 interface ToStringContext {

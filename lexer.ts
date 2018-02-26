@@ -19,6 +19,7 @@ export enum Token {
   Asterisk,
   Bar,
   BarBar,
+  Caret,
   CloseBrace,
   CloseBracket,
   CloseParenthesis,
@@ -41,6 +42,7 @@ export enum Token {
   QuestionMark,
   Semicolon,
   Slash,
+  Tilde,
 
   // Keywords
   Break,
@@ -141,7 +143,9 @@ export function advance(lexer: Lexer): void {
       case '}': lexer.token = Token.CloseBrace; break;
       case '*': lexer.token = Token.Asterisk; break;
       case '/': lexer.token = Token.Slash; break;
+      case '^': lexer.token = Token.Caret; break;
       case '+': lexer.token = Token.Plus; break;
+      case '~': lexer.token = Token.Tilde; break;
 
       case '<':
         if (lexer.end < limit && lexer.text[lexer.end] === '=') {
