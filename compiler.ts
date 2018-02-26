@@ -388,7 +388,20 @@ function compileStmts(context: Context, stmts: Stmt[], func: Func, parent: Scope
       }
 
       case 'Assign': {
-        const value = compileExpr(context, stmt.kind.value, func, scope, null);
+        const target = stmt.kind.target;
+        if (target.kind.kind !== 'Name') {
+          appendToLog(context.log, target.range, `Invalid assignment target`);
+          break;
+        }
+
+        const local = findLocal(scope, target.kind.value);
+        if (local === null) {
+          appendToLog(context.log, target.range, `There is no local variable named "${name}" here`);
+          break;
+        }
+
+        const result = compileExpr(context, stmt.kind.value, func, scope, local.typeID);
+        addLocalSet(func, context.currentBlock, local.index, result.value);
         break;
       }
 
