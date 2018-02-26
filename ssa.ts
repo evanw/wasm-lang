@@ -272,16 +272,47 @@ function blockToString(context: ToStringContext, block: BasicBlock, indent: stri
         break;
 
       case 'Eq32':
+        text += `${indent}t${i} = i32.eq ${refToString(context.func, ins.left)}, ${refToString(context.func, ins.right)}\n`;
+        break;
+
       case 'NotEq32':
+        text += `${indent}t${i} = i32.ne ${refToString(context.func, ins.left)}, ${refToString(context.func, ins.right)}\n`;
+        break;
+
       case 'Lt32S':
+        text += `${indent}t${i} = i32.lt_s ${refToString(context.func, ins.left)}, ${refToString(context.func, ins.right)}\n`;
+        break;
+
       case 'Lt32U':
+        text += `${indent}t${i} = i32.lt_u ${refToString(context.func, ins.left)}, ${refToString(context.func, ins.right)}\n`;
+        break;
+
       case 'LtEq32S':
+        text += `${indent}t${i} = i32.lte_s ${refToString(context.func, ins.left)}, ${refToString(context.func, ins.right)}\n`;
+        break;
+
       case 'LtEq32U':
+        text += `${indent}t${i} = i32.lte_u ${refToString(context.func, ins.left)}, ${refToString(context.func, ins.right)}\n`;
+        break;
+
       case 'Add32':
+        text += `${indent}t${i} = i32.add ${refToString(context.func, ins.left)}, ${refToString(context.func, ins.right)}\n`;
+        break;
+
       case 'Sub32':
+        text += `${indent}t${i} = i32.sub ${refToString(context.func, ins.left)}, ${refToString(context.func, ins.right)}\n`;
+        break;
+
       case 'Mul32':
+        text += `${indent}t${i} = i32.mul ${refToString(context.func, ins.left)}, ${refToString(context.func, ins.right)}\n`;
+        break;
+
       case 'Div32S':
+        text += `${indent}t${i} = i32.div_s ${refToString(context.func, ins.left)}, ${refToString(context.func, ins.right)}\n`;
+        break;
+
       case 'Div32U':
+        text += `${indent}t${i} = i32.div_u ${refToString(context.func, ins.left)}, ${refToString(context.func, ins.right)}\n`;
         break;
 
       default: {

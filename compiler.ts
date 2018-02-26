@@ -1,6 +1,8 @@
 import { Log, Range, appendToLog } from './log';
 import { Parsed, TypeExpr, CtorDecl, DefDecl, Stmt, Expr, BinOp } from './parser';
-import { Func, RawType, createFunc, createLocal, ValueRef, createConstant, addLocalGet, Code, createBlock, addLocalSet, setJump, addIns, InsRef, unwrapRef, setNext } from './ssa';
+import { Func, RawType, createFunc, createLocal, ValueRef, createConstant, addLocalGet,
+  Code, createBlock, addLocalSet, setJump, addIns, InsRef, unwrapRef, setNext, Ins } from './ssa';
+import { assert } from './util';
 
 interface TypeID {
   index: number;
@@ -548,46 +550,38 @@ function compileExpr(context: Context, expr: Expr, func: Func, scope: Scope, cas
 
     case 'Binary':
       switch (expr.kind.op) {
-        case BinOp.And: {
-          // Compile the left
-          const local = createLocal(func, RawType.I32);
-          const left = compileExpr(context, expr.kind.left, func, scope, context.boolTypeID);
-          const leftEnd = context.currentBlock;
-          addLocalSet(func, leftEnd, local, left.value);
-
-          // Skip the right if true
-          const rightStart = createBlock(func);
-          const next = createBlock(func);
-          setJump(func, leftEnd, {
-            kind: 'Branch',
-            value: left.value.ref,
-            yes: {kind: 'Next', parent: leftEnd},
-            no: {kind: 'Child', index: rightStart},
-          });
-          setNext(func, leftEnd, next);
-
-          // Otherwise evaluate the right
-          context.currentBlock = rightStart;
-          const right = compileExpr(context, expr.kind.right, func, scope, context.boolTypeID);
-          const rightEnd = context.currentBlock;
-          addLocalSet(func, rightEnd, local, right.value);
-          setJump(func, rightEnd, {
-            kind: 'Goto',
-            target: {kind: 'Next', parent: leftEnd},
-          });
-
-          // Merge the control flow for following expressions
-          context.currentBlock = next;
-          result = {
-            typeID: context.boolTypeID,
-            value: addLocalGet(func, context.currentBlock, local),
-          };
+        case BinOp.Add:
+        case BinOp.Sub:
+        case BinOp.Mul:
+        case BinOp.Div: {
+          result = compileMath32(context, func, scope, expr.kind.op, expr.kind.left, expr.kind.right);
           break;
         }
 
-        default:
-          appendToLog(context.log, expr.range, `${BinOp[expr.kind.op]} is not currently implemented`);
+        case BinOp.Eq:
+        case BinOp.NotEq: {
+          result = compileEqual(context, func, scope, expr.kind.op, expr.kind.left, expr.kind.right);
           break;
+        }
+
+        case BinOp.Lt:
+        case BinOp.LtEq:
+        case BinOp.Gt:
+        case BinOp.GtEq: {
+          result = compileCompare32(context, func, scope, expr.kind.op, expr.kind.left, expr.kind.right);
+          break;
+        }
+
+        case BinOp.And:
+        case BinOp.Or: {
+          result = compileShortCircuit(context, func, scope, expr.kind.op, expr.kind.left, expr.kind.right);
+          break;
+        }
+
+        default: {
+          const checkCovered: void = expr.kind.op;
+          throw new Error('Internal error');
+        }
       }
       break;
 
@@ -688,6 +682,120 @@ function compileExpr(context: Context, expr: Expr, func: Func, scope: Scope, cas
   }
 
   return cast(context, expr.range, result, castTo, func);
+}
+
+function compileEqual(context: Context, func: Func, scope: Scope, op: BinOp, leftExpr: Expr, rightExpr: Expr): Result {
+  const l = compileExpr(context, leftExpr, func, scope, null);
+  const r = compileExpr(context, rightExpr, func, scope, null);
+
+  if (l.typeID === context.errorTypeID || r.typeID === context.errorTypeID) {
+    return {
+      typeID: context.boolTypeID,
+      value: createConstant(func, 0),
+    };
+  }
+
+  if (l.typeID !== r.typeID) {
+    appendToLog(context.log, {start: leftExpr.range.start, end: rightExpr.range.end},
+      `Cannot compare type "${context.types[l.typeID.index].name}" and type "${context.types[r.typeID.index].name}"`);
+    return {
+      typeID: context.boolTypeID,
+      value: createConstant(func, 0),
+    };
+  }
+
+  const left = unwrapRef(func, context.currentBlock, l.value);
+  const right = unwrapRef(func, context.currentBlock, r.value);
+  let ins: Ins;
+
+  switch (op) {
+    case BinOp.Eq: ins = {kind: 'Eq32', left, right}; break;
+    case BinOp.NotEq: ins = {kind: 'NotEq32', left, right}; break;
+    default: throw new Error('Internal error');
+  }
+
+  return {
+    typeID: context.boolTypeID,
+    value: addIns(func, context.currentBlock, ins),
+  };
+}
+
+function compileCompare32(context: Context, func: Func, scope: Scope, op: BinOp, leftExpr: Expr, rightExpr: Expr): Result {
+  const l = compileExpr(context, leftExpr, func, scope, context.intTypeID);
+  const r = compileExpr(context, rightExpr, func, scope, context.intTypeID);
+  const left = unwrapRef(func, context.currentBlock, l.value);
+  const right = unwrapRef(func, context.currentBlock, r.value);
+  let ins: Ins;
+
+  switch (op) {
+    case BinOp.Lt: ins = {kind: 'Lt32S', left, right}; break;
+    case BinOp.LtEq: ins = {kind: 'LtEq32S', left, right}; break;
+    case BinOp.Gt: ins = {kind: 'Lt32S', left: right, right: left}; break;
+    case BinOp.GtEq: ins = {kind: 'LtEq32S', left: right, right: left}; break;
+    default: throw new Error('Internal error');
+  }
+
+  return {
+    typeID: context.boolTypeID,
+    value: addIns(func, context.currentBlock, ins),
+  };
+}
+
+function compileMath32(context: Context, func: Func, scope: Scope, op: BinOp, leftExpr: Expr, rightExpr: Expr): Result {
+  const l = compileExpr(context, leftExpr, func, scope, context.intTypeID);
+  const r = compileExpr(context, rightExpr, func, scope, context.intTypeID);
+  const left = unwrapRef(func, context.currentBlock, l.value);
+  const right = unwrapRef(func, context.currentBlock, r.value);
+  let ins: Ins;
+
+  switch (op) {
+    case BinOp.Add: ins = {kind: 'Add32', left, right}; break;
+    case BinOp.Sub: ins = {kind: 'Sub32', left, right}; break;
+    case BinOp.Mul: ins = {kind: 'Mul32', left, right}; break;
+    case BinOp.Div: ins = {kind: 'Div32S', left, right}; break;
+    default: throw new Error('Internal error');
+  }
+
+  return {
+    typeID: context.intTypeID,
+    value: addIns(func, context.currentBlock, ins),
+  };
+}
+
+function compileShortCircuit(context: Context, func: Func, scope: Scope, op: BinOp, leftExpr: Expr, rightExpr: Expr): Result {
+  // Compile the left
+  const local = createLocal(func, RawType.I32);
+  const left = compileExpr(context, leftExpr, func, scope, context.boolTypeID);
+  const leftEnd = context.currentBlock;
+  addLocalSet(func, leftEnd, local, left.value);
+
+  // Skip the right if the condition was met
+  const rightStart = createBlock(func);
+  const next = createBlock(func);
+  setJump(func, leftEnd, {
+    kind: 'Branch',
+    value: left.value.ref,
+    yes: op === BinOp.And ? {kind: 'Child', index: rightStart} : {kind: 'Next', parent: leftEnd},
+    no: op === BinOp.And ? {kind: 'Next', parent: leftEnd} : {kind: 'Child', index: rightStart},
+  });
+  setNext(func, leftEnd, next);
+
+  // Otherwise evaluate the right
+  context.currentBlock = rightStart;
+  const right = compileExpr(context, rightExpr, func, scope, context.boolTypeID);
+  const rightEnd = context.currentBlock;
+  addLocalSet(func, rightEnd, local, right.value);
+  setJump(func, rightEnd, {
+    kind: 'Goto',
+    target: {kind: 'Next', parent: leftEnd},
+  });
+
+  // Merge the control flow for following expressions
+  context.currentBlock = next;
+  return {
+    typeID: context.boolTypeID,
+    value: addLocalGet(func, context.currentBlock, local),
+  };
 }
 
 function forwardToDefaultCtor(context: Context, global: GlobalRef): GlobalRef {
