@@ -1,7 +1,7 @@
 import { Log, Range, appendToLog } from './log';
 import { Parsed, TypeExpr, CtorDecl, DefDecl, Stmt, Expr, BinOp, UnOp } from './parser';
 import { Func, RawType, createFunc, createLocal, ValueRef, createConstant, addLocalGet,
-  Code, createBlock, addLocalSet, setJump, addIns, InsRef, unwrapRef, setNext, Ins } from './ssa';
+  Code, createBlock, addLocalSet, setJump, addIns, InsRef, unwrapRef, setNext, Ins, hasMissingReturn, JumpTarget } from './ssa';
 
 interface TypeID {
   index: number;
@@ -217,6 +217,11 @@ function compileDefs(context: Context, parsed: Parsed): void {
     func.retType = rawTypeForTypeID(context, data.retTypeID);
     compileStmts(context, def.body, func, scope, data.retTypeID);
     context.code.funcs.push(func);
+
+    // Check for a missing return statement
+    if (data.retTypeID !== context.voidTypeID && hasMissingReturn(func)) {
+      appendToLog(context.log, def.nameRange, `Not all code paths return a value`);
+    }
   }
 }
 
@@ -283,9 +288,9 @@ function compileStmts(context: Context, stmts: Stmt[], func: Func, parent: Scope
 
         // The parser handles out-of-bounds error reporting
         if (count >= 1 && count <= context.loops.length) {
-          const after = createBlock(func);
-          setJump(func, context.currentBlock, {kind: 'Goto', target: {kind: 'Next', parent: context.loops[count - 1]}});
-          context.currentBlock = after;
+          const target: JumpTarget = {kind: 'Next', parent: context.loops[context.loops.length - count]};
+          setJump(func, context.currentBlock, {kind: 'Goto', target});
+          context.currentBlock = createBlock(func);
         }
         break;
       }
@@ -295,9 +300,9 @@ function compileStmts(context: Context, stmts: Stmt[], func: Func, parent: Scope
 
         // The parser handles out-of-bounds error reporting
         if (count >= 1 && count <= context.loops.length) {
-          const after = createBlock(func);
-          setJump(func, context.currentBlock, {kind: 'Goto', target: {kind: 'Loop', parent: context.loops[count - 1]}});
-          context.currentBlock = after;
+          const target: JumpTarget = {kind: 'Loop', parent: context.loops[context.loops.length - count]};
+          setJump(func, context.currentBlock, {kind: 'Goto', target});
+          context.currentBlock = createBlock(func);
         }
         break;
       }
@@ -362,14 +367,19 @@ function compileStmts(context: Context, stmts: Stmt[], func: Func, parent: Scope
         setJump(func, loop, {kind: 'Goto', target: {kind: 'Child', index: header}});
         context.currentBlock = header;
 
-        // Compile the test
-        const test = compileExpr(context, stmt.kind.test, func, scope, context.boolTypeID);
-        setJump(func, context.currentBlock, {
-          kind: 'Branch',
-          value: test.value.ref,
-          yes: {kind: 'Next', parent: context.currentBlock},
-          no: {kind: 'Next', parent: loop},
-        });
+        // Compile the test (special-case "while true" for "return" statement checking)
+        const testExpr = stmt.kind.test;
+        if (testExpr.kind.kind === 'Bool' && testExpr.kind.value === true) {
+          setJump(func, header, {kind: 'Goto', target: {kind: 'Next', parent: header}});
+        } else {
+          const test = compileExpr(context, stmt.kind.test, func, scope, context.boolTypeID);
+          setJump(func, context.currentBlock, {
+            kind: 'Branch',
+            value: test.value.ref,
+            yes: {kind: 'Next', parent: context.currentBlock},
+            no: {kind: 'Next', parent: loop},
+          });
+        }
 
         // Compile the body
         const body = createBlock(func);

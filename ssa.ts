@@ -72,7 +72,7 @@ export type Jump =
   {kind: 'Goto', target: JumpTarget} |
   {kind: 'Branch', value: InsRef, yes: JumpTarget, no: JumpTarget};
 
-type JumpTarget =
+export type JumpTarget =
   // This jumps to a child, which means this block is the child block's parent.
   {kind: 'Child', index: number} |
 
@@ -458,8 +458,58 @@ function typeOf(func: Func, block: number, ref: InsRef): RawType {
     case 'Mul32':
     case 'Div32S':
     case 'Div32U':
+    case 'And32':
+    case 'Or32':
+    case 'Xor32':
       return RawType.I32;
-  }
 
-  throw new Error('Internal error');
+    default: {
+      const checkCovered: void = ins;
+      throw new Error('Internal error');
+    }
+  }
+}
+
+export function hasMissingReturn(func: Func): boolean {
+  return blockHasMissing(func, 0, new Set());
+}
+
+function blockHasMissing(func: Func, index: number, visited: Set<number>): boolean {
+  if (visited.has(index)) {
+    return false;
+  }
+  visited.add(index);
+
+  const block = func.blocks[index];
+  switch (block.jump.kind) {
+    case 'Missing':
+      return true;
+
+    case 'Return':
+    case 'ReturnVoid':
+      return false;
+
+    case 'Goto':
+      return jumpHasMissing(func, block.jump.target, visited);
+
+    case 'Branch':
+      return jumpHasMissing(func, block.jump.yes, visited) || jumpHasMissing(func, block.jump.no, visited);
+
+    default: {
+      const checkCovered: void = block.jump;
+      throw new Error('Internal error');
+    }
+  }
+}
+
+function jumpHasMissing(func: Func, jump: JumpTarget, visited: Set<number>): boolean {
+  switch (jump.kind) {
+    case 'Child': return blockHasMissing(func, jump.index, visited);
+    case 'Next': return blockHasMissing(func, func.blocks[jump.parent].next, visited);
+    case 'Loop': return false;
+    default: {
+      const checkCovered: void = jump;
+      throw new Error('Internal error');
+    }
+  }
 }
