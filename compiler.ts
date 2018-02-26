@@ -47,7 +47,7 @@ interface Context {
   ptrType: RawType;
   types: TypeData[];
   defs: DefData[];
-  globalScope: {[name: string]: GlobalRef};
+  globalScope: Map<string, GlobalRef>;
 
   // Function-specific temporaries
   currentBlock: number;
@@ -62,12 +62,12 @@ interface Context {
 }
 
 function defineGlobal(context: Context, range: Range, name: string, ref: GlobalRef): boolean {
-  if (name in context.globalScope) {
+  if (context.globalScope.get(name) !== undefined) {
     appendToLog(context.log, range, `The name "${name}" is already used`);
     return false;
   }
 
-  context.globalScope[name] = ref;
+  context.globalScope.set(name, ref);
   return true;
 }
 
@@ -96,10 +96,10 @@ function resolveTypeExpr(context: Context, type: TypeExpr): TypeID {
 }
 
 function resolveTypeName(context: Context, range: Range, name: string): TypeID {
-  const ref = context.globalScope[name];
+  const ref = context.globalScope.get(name);
 
   // Check that the name exists
-  if (!ref) {
+  if (ref === undefined) {
     appendToLog(context.log, range, `There is no type named "${name}"`);
     return context.errorTypeID;
   }
@@ -182,7 +182,7 @@ interface Local {
 
 interface Scope {
   parent: Scope | null;
-  locals: {[name: string]: Local};
+  locals: Map<string, Local>;
 }
 
 function compileDefs(context: Context, parsed: Parsed): void {
@@ -206,7 +206,7 @@ function compileDefs(context: Context, parsed: Parsed): void {
   for (const [defID, def] of list) {
     const data = context.defs[defID];
     const func = createFunc(def.name, context.ptrType);
-    const scope: Scope = {parent: null, locals: {}};
+    const scope: Scope = {parent: null, locals: new Map()};
 
     // Add a local variable for each argument
     for (let i = 0; i < def.args.length; i++) {
@@ -225,7 +225,7 @@ function compileDefs(context: Context, parsed: Parsed): void {
 }
 
 function compileStmts(context: Context, stmts: Stmt[], func: Func, parent: Scope, retTypeID: TypeID): void {
-  const scope = {parent, locals: {}};
+  const scope: Scope = {parent, locals: new Map()};
 
   for (const stmt of stmts) {
     switch (stmt.kind.kind) {
@@ -495,8 +495,8 @@ function compileExpr(context: Context, expr: Expr, func: Func, scope: Scope, cas
       }
 
       // Check for a global next
-      let global = context.globalScope[name];
-      if (global) {
+      let global = context.globalScope.get(name);
+      if (global !== undefined) {
         global = forwardToDefaultCtor(context, global);
         if (global.kind === 'Ctor') {
           const ctor = context.types[global.typeID.index].ctors[global.index];
@@ -537,8 +537,8 @@ function compileExpr(context: Context, expr: Expr, func: Func, scope: Scope, cas
       }
 
       // Check for a global next
-      let global = context.globalScope[name];
-      if (!global) {
+      let global = context.globalScope.get(name);
+      if (global === undefined) {
         appendToLog(context.log, expr.kind.nameRange, `There is no symbol named "${name}" here`);
         break;
       }
@@ -652,8 +652,9 @@ function cast(context: Context, range: Range, result: Result, to: TypeID, func: 
 }
 
 function findLocal(scope: Scope, name: string): Local | null {
-  if (name in scope.locals) {
-    return scope.locals[name];
+  const local = scope.locals.get(name);
+  if (local !== undefined) {
+    return local;
   }
 
   if (scope.parent !== null) {
@@ -677,7 +678,7 @@ function defineLocal(context: Context, func: Func, scope: Scope, name: string, r
   }
 
   const index = createLocal(func, rawTypeForTypeID(context, typeID));
-  scope.locals[name] = {typeID, index};
+  scope.locals.set(name, {typeID, index});
   return index;
 }
 
@@ -688,7 +689,7 @@ export function compile(log: Log, parsed: Parsed, ptrType: RawType): Code {
     ptrType,
     types: [],
     defs: [],
-    globalScope: {},
+    globalScope: new Map(),
 
     // Function-specific temporaries
     currentBlock: -1,

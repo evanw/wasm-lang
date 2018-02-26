@@ -63,7 +63,7 @@ export interface BasicBlock {
   // to already hold the value for that local. That way we can avoid needlessly
   // reloading the same local over and over within a given block. This will be
   // updated whenever a "LocalGet" or "LocalSet" instruction is needed.
-  previousLocals: {[index: number]: InsRef};
+  previousLocals: Map<number, InsRef>;
 
   // This maps an InsRef for this block to the index of a local variable. It's
   // used to "spill" values to a temporary local variable when they are needed
@@ -73,7 +73,7 @@ export interface BasicBlock {
   // already been allocated and the variable is spilled in the source block and
   // loaded in the target block. This map tracks the spill so it can be reused
   // if it's needed again in the future instead of generating another one.
-  spills: {[index: number]: number};
+  spills: Map<number, number>;
 }
 
 export interface Func {
@@ -119,8 +119,8 @@ export function createBlock(func: Func): number {
   func.blocks.push({
     insList: [],
     jump: {kind: 'Missing'},
-    previousLocals: {},
-    spills: {},
+    previousLocals: new Map(),
+    spills: new Map(),
   });
   return func.blocks.length - 1;
 }
@@ -162,15 +162,18 @@ export function addIns(func: Func, block: number, ins: Ins): ValueRef {
 
 export function addLocalGet(func: Func, block: number, local: number): ValueRef {
   const target = func.blocks[block];
-  const ref = target.previousLocals[local] || (target.previousLocals[local] =
-    addIns(func, block, {kind: 'LocalGet', local}).ref);
+  let ref = target.previousLocals.get(local);
+  if (ref === undefined) {
+    ref = addIns(func, block, {kind: 'LocalGet', local}).ref;
+    target.previousLocals.set(local, ref);
+  }
   return {block, ref};
 }
 
 export function addLocalSet(func: Func, block: number, local: number, value: ValueRef): ValueRef {
   const target = func.blocks[block];
   const ref = unwrapRef(func, block, value);
-  target.previousLocals[local] = ref;
+  target.previousLocals.set(local, ref);
   return addIns(func, block, {kind: 'LocalSet', local, value: ref});
 }
 
@@ -305,10 +308,11 @@ export function codeToString(code: Code): string {
 function spillToLocal(func: Func, block: number, ref: InsRef): number {
   assert(ref.index >= 0);
   const spills = func.blocks[block].spills;
-  if (ref.index in spills) return spills[ref.index];
+  const spill = spills.get(ref.index);
+  if (spill !== undefined) return spill;
   const local = createLocal(func, typeOf(func, block, ref));
   addLocalSet(func, block, local, {block, ref});
-  spills[ref.index] = local;
+  spills.set(ref.index, local);
   return local;
 }
 
