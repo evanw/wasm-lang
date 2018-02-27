@@ -1,6 +1,8 @@
-import { Code, RawType } from './ssa';
+import { Code, RawType, Func } from './ssa';
 
 declare const Buffer: any;
+
+const FUNC_END = 0x0B;
 
 enum Section {
   Type = 1,
@@ -40,6 +42,10 @@ interface FuncType {
 class ByteBuffer {
   private _buffer = new Uint8Array(1024);
   private _length = 0;
+
+  get length(): number {
+    return this._length;
+  }
 
   finish(): Uint8Array {
     return this._buffer.slice(0, this._length);
@@ -93,6 +99,14 @@ class ByteBuffer {
   }
 }
 
+function rawTypeToType(type: RawType): Type {
+  switch (type) {
+    case RawType.I32: return Type.I32;
+    case RawType.I64: return Type.I64;
+    default: throw new Error('Internal error');
+  }
+}
+
 function gatherTypes(code: Code): {funcTypes: FuncType[], funcIndices: number[]} {
   const funcTypeMap = new Map<string, number>();
   const funcIndices: number[] = [];
@@ -108,9 +122,8 @@ function gatherTypes(code: Code): {funcTypes: FuncType[], funcIndices: number[]}
     if (index === undefined) {
       index = funcTypes.length;
       funcTypes.push({
-        argTypes: func.argTypes.map(t => t === RawType.I64 ? Type.I64 : Type.I32),
-        retType: func.retType === RawType.Void ? null :
-          func.retType === RawType.I64 ? Type.I64 : Type.I32,
+        argTypes: func.argTypes.map(rawTypeToType),
+        retType: func.retType === RawType.Void ? null : rawTypeToType(func.retType),
       });
       funcTypeMap.set(key, index);
     }
@@ -119,6 +132,48 @@ function gatherTypes(code: Code): {funcTypes: FuncType[], funcIndices: number[]}
   }
 
   return {funcIndices, funcTypes};
+}
+
+interface Locals {
+  groups: {count: number, type: Type, offset: number}[];
+  remap: number[];
+}
+
+function gatherLocals(func: Func): Locals {
+  const locals: Locals = {groups: [], remap: []};
+  const infos: {type: Type, offset: number}[] = [];
+
+  // Group locals by type
+  next: for (const local of func.locals) {
+    const type = rawTypeToType(local);
+    for (const group of locals.groups) {
+      if (group.type === type) {
+        infos.push({type, offset: group.count++});
+        continue next;
+      }
+    }
+    infos.push({type, offset: 0});
+    locals.groups.push({type, count: 1, offset: 0});
+  }
+
+  // Compute group offsets
+  let total = 0;
+  for (const group of locals.groups) {
+    group.offset = total;
+    total += group.count;
+  }
+
+  // Remap locals to their new ids
+  for (const info of infos) {
+    for (const group of locals.groups) {
+      if (group.type === info.type) {
+        locals.remap.push(group.offset + info.offset);
+        break;
+      }
+    }
+  }
+
+  return locals;
 }
 
 export function encodeWASM(code: Code): Uint8Array {
@@ -181,9 +236,29 @@ export function encodeWASM(code: Code): Uint8Array {
   const codeBB = new ByteBuffer;
   codeBB.writeVarU(code.funcs.length);
   for (const func of code.funcs) {
-    // TODO
+    const {groups, remap} = gatherLocals(func);
+    const bodyBB = new ByteBuffer;
+    bodyBB.writeVarU(groups.length);
+    for (const group of groups) {
+      bodyBB.writeVarU(group.count);
+      bodyBB.writeVarS(group.type);
+    }
+    writeBlock({code, func, bb: bodyBB}, 0);
+    bodyBB.writeByte(FUNC_END);
+    codeBB.writeVarU(bodyBB.length);
+    codeBB.writeBytes(bodyBB.finish());
   }
   bb.writeSection(Section.Code, codeBB);
 
   return bb.finish();
+}
+
+interface WriteContext {
+  code: Code;
+  func: Func;
+  bb: ByteBuffer;
+}
+
+function writeBlock(context: WriteContext, index: number): void {
+  // TODO
 }

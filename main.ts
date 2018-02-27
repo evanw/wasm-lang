@@ -26,4 +26,4 @@ export async function main(): Promise<void> {
   }
 }
 
-main();
+main().catch(e => setTimeout(() => { throw e; }, 0));
