@@ -13,8 +13,6 @@ export enum RawType {
 }
 
 export type Ins =
-  {kind: 'Nop'} |
-  {kind: 'Alias', value: InsRef, type: RawType} |
   {kind: 'Call', index: number, args: InsRef[], retType: RawType} |
 
   {kind: 'PtrGlobal', index: number} |
@@ -189,6 +187,14 @@ export function createConstant(func: Func, value: number): ValueRef {
   return {block: -1, ref: {index: -func.constants.length}};
 }
 
+export function getConstant(func: Func, ref: InsRef): number | null {
+  return ref.index < 0 ? func.constants[~ref.index] : null;
+}
+
+export function getIndex(ref: InsRef): number | null {
+  return ref.index >= 0 ? ref.index : null;
+}
+
 export function unwrapRef(func: Func, block: number, value: ValueRef): InsRef {
   if (value.block === block || value.block < 0) return value.ref;
   const local = spillToLocal(func, value.block, value.ref);
@@ -219,9 +225,71 @@ export function addLocalSet(func: Func, block: number, local: number, value: Val
   return addIns(func, block, {kind: 'LocalSet', local, value: ref});
 }
 
+export function argsOf(ins: Ins): InsRef[] {
+  switch (ins.kind) {
+    case 'Call': return ins.args;
+    case 'PtrGlobal': return [];
+    case 'PtrStack': return [];
+
+    case 'MemAlloc': return [ins.size];
+    case 'MemFree': return [ins.ptr, ins.size];
+    case 'MemCopy': return [ins.from, ins.to];
+
+    case 'MemGet8': return [ins.ptr];
+    case 'MemSet8': return [ins.ptr, ins.value];
+    case 'MemGet32': return [ins.ptr];
+    case 'MemSet32': return [ins.ptr, ins.value];
+
+    case 'LocalGet': return [];
+    case 'LocalSet': return [ins.value];
+
+    case 'Retain': return [ins.ptr];
+    case 'Release': return [ins.ptr];
+
+    case 'Eq32': return [ins.left, ins.right];
+    case 'NotEq32': return [ins.left, ins.right];
+    case 'Lt32S': return [ins.left, ins.right];
+    case 'Lt32U': return [ins.left, ins.right];
+    case 'LtEq32S': return [ins.left, ins.right];
+    case 'LtEq32U': return [ins.left, ins.right];
+
+    case 'And32': return [ins.left, ins.right];
+    case 'Or32': return [ins.left, ins.right];
+    case 'Xor32': return [ins.left, ins.right];
+    case 'Add32': return [ins.left, ins.right];
+    case 'Sub32': return [ins.left, ins.right];
+    case 'Mul32': return [ins.left, ins.right];
+    case 'Div32S': return [ins.left, ins.right];
+    case 'Div32U': return [ins.left, ins.right];
+
+    default: {
+      const checkCovered: void = ins;
+      throw new Error('Internal error');
+    }
+  }
+}
+
+export function countUses(block: BasicBlock): number[] {
+  const uses: number[] = [];
+
+  for (const ins of block.insList) {
+    uses.push(0);
+
+    for (const arg of argsOf(ins)) {
+      const index = getIndex(arg);
+      if (index !== null) {
+        assert(index >= 0 && index < uses.length);
+        uses[index]++;
+      }
+    }
+  }
+
+  return uses;
+}
+
 function refToString(func: Func, ref: InsRef): string {
-  if (ref.index >= 0) return `t${ref.index}`;
-  return func.constants[~ref.index].toString();
+  const constant = getConstant(func, ref);
+  return constant !== null ? constant.toString() : `t${ref.index}`;
 }
 
 function blockToString(context: ToStringContext, block: BasicBlock, indent: string): string {
@@ -231,13 +299,6 @@ function blockToString(context: ToStringContext, block: BasicBlock, indent: stri
     const ins = block.insList[i];
 
     switch (ins.kind) {
-      case 'Nop':
-        break;
-
-      case 'Alias':
-        text += `${indent}t${i} = ${refToString(context.func, ins.value)}\n`;
-        break;
-
       case 'Call': {
         const args = [context.code.funcs[ins.index].name];
         for (const arg of ins.args) {
@@ -249,14 +310,18 @@ function blockToString(context: ToStringContext, block: BasicBlock, indent: stri
 
       case 'PtrGlobal':
       case 'PtrStack':
+        throw new Error('Not yet implemented');
+
       case 'MemAlloc':
       case 'MemFree':
       case 'MemCopy':
+        throw new Error('Not yet implemented');
+
       case 'MemGet8':
       case 'MemSet8':
       case 'MemGet32':
       case 'MemSet32':
-        break;
+        throw new Error('Not yet implemented');
 
       case 'LocalGet':
         text += `${indent}t${i} = v${ins.local}\n`;
@@ -280,6 +345,7 @@ function blockToString(context: ToStringContext, block: BasicBlock, indent: stri
       case 'Lt32U': text += binaryToString(context, i, 'i32.lt_u', indent, ins.left, ins.right); break;
       case 'LtEq32S': text += binaryToString(context, i, 'i32.lte_s', indent, ins.left, ins.right); break;
       case 'LtEq32U': text += binaryToString(context, i, 'i32.lte_u', indent, ins.left, ins.right); break;
+
       case 'And32': text += binaryToString(context, i, 'i32.and', indent, ins.left, ins.right); break;
       case 'Or32': text += binaryToString(context, i, 'i32.or', indent, ins.left, ins.right); break;
       case 'Xor32': text += binaryToString(context, i, 'i32.xor', indent, ins.left, ins.right); break;
@@ -416,7 +482,7 @@ function spillToLocal(func: Func, block: number, ref: InsRef): number {
   return local;
 }
 
-function typeOf(func: Func, block: number, ref: InsRef): RawType {
+export function typeOf(func: Func, block: number, ref: InsRef): RawType {
   const target = func.blocks[block];
   const ins = target.insList[ref.index];
 
@@ -424,7 +490,6 @@ function typeOf(func: Func, block: number, ref: InsRef): RawType {
     case 'LocalGet':
       return func.locals[ins.local];
 
-    case 'Nop':
     case 'MemFree':
     case 'MemCopy':
     case 'MemSet8':
@@ -438,9 +503,6 @@ function typeOf(func: Func, block: number, ref: InsRef): RawType {
     case 'PtrStack':
     case 'MemAlloc':
       return func.ptrType;
-
-    case 'Alias':
-      return ins.type;
 
     case 'Call':
       return ins.retType;
