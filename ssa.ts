@@ -88,10 +88,10 @@ export interface BasicBlock {
   jump: Jump;
 
   // This is the index of the next basic block in the basic block tree. It will
-  // be -1 if there's no such block (e.g. if this is the last branch inside a
+  // be null if there's no such block (e.g. if this is the last branch inside a
   // loop body). Note that control flow doesn't necessarily transfer into this
   // block at all (e.g. a loop body with a return statement).
-  next: number;
+  next: number | null;
 
   // This maps the index of a local to the InsRef for this block that is known
   // to already hold the value for that local. That way we can avoid needlessly
@@ -153,7 +153,7 @@ export function createBlock(func: Func): number {
   func.blocks.push({
     insList: [],
     jump: {kind: 'Missing'},
-    next: -1,
+    next: null,
     previousLocals: new Map(),
     spills: new Map(),
   });
@@ -165,7 +165,7 @@ export function setJump(func: Func, block: number, jump: Jump): void {
 }
 
 export function setNext(func: Func, block: number, next: number): void {
-  assert(next >= -1 && next < func.blocks.length);
+  assert(next >= 0 && next < func.blocks.length);
   func.blocks[block].next = next;
 }
 
@@ -417,10 +417,10 @@ export function codeToString(code: Code): string {
   return text;
 }
 
-function blockTreeToString(context: ToStringContext, index: number, indent: string): string {
+function blockTreeToString(context: ToStringContext, index: number | null, indent: string): string {
   let text = '';
 
-  while (index !== -1) {
+  while (index !== null) {
     const block = context.func.blocks[index];
     context.stack.push(index);
     text += `${indent}l${context.stack.length - 1}: {\n`;
@@ -554,46 +554,99 @@ export function typeOf(func: Func, block: number, ref: InsRef): RawType {
   }
 }
 
-export function hasMissingReturn(func: Func): boolean {
-  return blockHasMissing(func, 0, new Set());
+export interface BlockMeta {
+  isLive: boolean;
+  isNextTarget: boolean;
+  isLoopTarget: boolean;
+  isNestedNextTarget: boolean;
+  isNestedLoopTarget: boolean;
 }
 
-function blockHasMissing(func: Func, index: number, visited: Set<number>): boolean {
-  if (visited.has(index)) {
-    return false;
-  }
-  visited.add(index);
+export function buildBlockMetas(func: Func): BlockMeta[] {
+  const metas: BlockMeta[] = [];
 
+  for (const block of func.blocks) {
+    metas.push({
+      isLive: false,
+      isNextTarget: false,
+      isLoopTarget: false,
+      isNestedNextTarget: false,
+      isNestedLoopTarget: false,
+    });
+  }
+
+  visitBlock(func, metas, 0);
+  return metas;
+}
+
+function visitBlock(func: Func, metas: BlockMeta[], index: number): void {
   const block = func.blocks[index];
+  const meta = metas[index];
+  meta.isLive = true;
+
   switch (block.jump.kind) {
     case 'Missing':
-      return true;
-
     case 'Return':
     case 'ReturnVoid':
-      return false;
+      break;
 
     case 'Goto':
-      return jumpHasMissing(func, block.jump.target, visited);
+      visitJumpTarget(func, metas, index, block.jump.target);
+      break;
 
     case 'Branch':
-      return jumpHasMissing(func, block.jump.yes, visited) || jumpHasMissing(func, block.jump.no, visited);
+      visitJumpTarget(func, metas, index, block.jump.yes);
+      visitJumpTarget(func, metas, index, block.jump.no);
+      break;
 
     default: {
       const checkCovered: void = block.jump;
       throw new Error('Internal error');
     }
   }
+
+  // Only visit our sibling if we or one of our children jumps to it
+  if (block.next !== null && meta.isNextTarget) {
+    visitBlock(func, metas, block.next);
+  }
 }
 
-function jumpHasMissing(func: Func, jump: JumpTarget, visited: Set<number>): boolean {
-  switch (jump.kind) {
-    case 'Child': return blockHasMissing(func, jump.index, visited);
-    case 'Next': return blockHasMissing(func, func.blocks[jump.parent].next, visited);
-    case 'Loop': return false;
+function visitJumpTarget(func: Func, metas: BlockMeta[], index: number, target: JumpTarget): void {
+  switch (target.kind) {
+    case 'Child':
+      visitBlock(func, metas, target.index);
+      break;
+
+    case 'Next': {
+      const meta = metas[target.parent];
+      meta.isNextTarget = true;
+      if (target.parent !== index) {
+        meta.isNestedNextTarget = true;
+      }
+      break;
+    }
+
+    case 'Loop': {
+      const meta = metas[target.parent];
+      meta.isLoopTarget = true;
+      if (target.parent !== index) {
+        meta.isNestedLoopTarget = true;
+      }
+      break;
+    }
+
     default: {
-      const checkCovered: void = jump;
+      const checkCovered: void = target;
       throw new Error('Internal error');
     }
   }
+}
+
+export function hasMissingReturn(func: Func, metas: BlockMeta[]): boolean {
+  for (let i = 0; i < metas.length; i++) {
+    if (metas[i].isLive && func.blocks[i].jump.kind === 'Missing') {
+      return true;
+    }
+  }
+  return false;
 }

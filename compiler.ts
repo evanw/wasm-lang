@@ -1,7 +1,7 @@
 import { Log, Range, appendToLog } from './log';
 import { Parsed, TypeExpr, CtorDecl, DefDecl, Stmt, Expr, BinOp, UnOp } from './parser';
 import { Func, RawType, createFunc, createLocal, ValueRef, createConstant, addLocalGet,
-  Code, createBlock, addLocalSet, setJump, addIns, InsRef, unwrapRef, setNext, Ins, hasMissingReturn, JumpTarget } from './ssa';
+  Code, createBlock, addLocalSet, setJump, addIns, InsRef, unwrapRef, setNext, Ins, hasMissingReturn, JumpTarget, buildBlockMetas } from './ssa';
 
 interface TypeID {
   index: number;
@@ -219,8 +219,11 @@ function compileDefs(context: Context, parsed: Parsed): void {
     context.code.funcs.push(func);
 
     // Check for a missing return statement
-    if (data.retTypeID !== context.voidTypeID && hasMissingReturn(func)) {
-      appendToLog(context.log, def.nameRange, `Not all code paths return a value`);
+    if (data.retTypeID !== context.voidTypeID) {
+      const metas = buildBlockMetas(func);
+      if (hasMissingReturn(func, metas)) {
+        appendToLog(context.log, def.nameRange, `Not all code paths return a value`);
+      }
     }
   }
 }
