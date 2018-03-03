@@ -19,8 +19,10 @@ export async function main(): Promise<void> {
   } else if (code !== null) {
     console.log(codeToString(code));
     const wasm = encodeWASM(code);
+    require('fs').writeFileSync('example.wasm', wasm);
     const {instance} = await WebAssembly.instantiate(wasm);
     console.log(instance);
+    console.log(instance.exports.main(1, 2));
   } else {
     console.log('done');
   }

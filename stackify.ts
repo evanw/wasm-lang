@@ -1,3 +1,4 @@
+/*
 // This code demonstrates a simplified "stackification" algorithm to turn
 // instructions in a basic block back into a tree. This is useful when
 // generating WebAssembly code from assembly instructions in SSA form.
@@ -211,3 +212,4 @@ stackify([
   {kind: 'Add', args: [3, ~4]},
   {kind: 'LocalSet', args: [~1, 5]},
 ]);
+*/

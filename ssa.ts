@@ -269,18 +269,40 @@ export function argsOf(ins: Ins): InsRef[] {
   }
 }
 
+function addUses(uses: number[], arg: InsRef): void {
+  const index = getIndex(arg);
+  if (index !== null) {
+    assert(index >= 0 && index < uses.length);
+    uses[index]++;
+  }
+}
+
 export function countUses(block: BasicBlock): number[] {
   const uses: number[] = [];
-
   for (const ins of block.insList) {
     uses.push(0);
-
     for (const arg of argsOf(ins)) {
-      const index = getIndex(arg);
-      if (index !== null) {
-        assert(index >= 0 && index < uses.length);
-        uses[index]++;
-      }
+      addUses(uses, arg);
+    }
+  }
+
+  switch (block.jump.kind) {
+    case 'Return':
+      addUses(uses, block.jump.value);
+      break;
+
+    case 'Branch':
+      addUses(uses, block.jump.value);
+      break;
+
+    case 'Missing':
+    case 'ReturnVoid':
+    case 'Goto':
+      break;
+
+    default: {
+      const checkCovered: void = block.jump;
+      throw new Error('Internal error');
     }
   }
 

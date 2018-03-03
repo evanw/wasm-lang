@@ -1,4 +1,4 @@
-import { Code, RawType, Func, InsRef, getConstant, getIndex, countUses, typeOf } from './ssa';
+import { Code, RawType, Func, InsRef, getConstant, getIndex, countUses, typeOf, Ins } from './ssa';
 
 declare const Buffer: any;
 
@@ -396,277 +396,176 @@ export function encodeWASM(code: Code): Uint8Array {
   return bb.finish();
 }
 
-function encodeFunc(func: Func, bb: ByteBuffer): void {
-  interface OpArg {
-    op: Opcode;
-    arg: number | null;
+interface OpArg {
+  op: Opcode;
+  arg: number | null;
+}
+
+function encodeIns(func: Func, args: InsRef[], opArgs: OpArg[], ins: Ins): void {
+  switch (ins.kind) {
+    case 'Call':
+      throw new Error('Not yet implemented');
+
+    case 'PtrGlobal':
+    case 'PtrStack':
+      throw new Error('Not yet implemented');
+
+    case 'MemAlloc':
+    case 'MemFree':
+    case 'MemCopy':
+      throw new Error('Not yet implemented');
+
+    case 'MemGet8':
+    case 'MemSet8':
+    case 'MemGet32':
+    case 'MemSet32':
+      throw new Error('Not yet implemented');
+
+    case 'LocalGet':
+      opArgs.push({op: Opcode.GetLocal, arg: ins.local});
+      break;
+
+    case 'LocalSet':
+      if (opArgs.length > 0) {
+        const last = opArgs[opArgs.length - 1];
+        if (last.op === Opcode.GetLocal && last.arg === ins.local) {
+          last.op = Opcode.TeeLocal;
+          break;
+        }
+      }
+      opArgs.push({op: Opcode.SetLocal, arg: ins.local});
+      args.push(ins.value);
+      break;
+
+    case 'Retain':
+    case 'Release':
+      throw new Error('Not yet implemented');
+
+    case 'Eq32': {
+      const leftConst = getConstant(func, ins.left);
+      const rightConst = getConstant(func, ins.right);
+      if (leftConst === 0) {
+        opArgs.push({op: Opcode.I32Eqz, arg: null});
+        args.push(ins.right);
+      } else if (rightConst === 0) {
+        opArgs.push({op: Opcode.I32Eqz, arg: null});
+        args.push(ins.left);
+      } else {
+        opArgs.push({op: Opcode.I32Eq, arg: null});
+        args.push(ins.left, ins.right);
+      }
+      break;
+    }
+
+    case 'NotEq32': encodeBinaryIns(args, opArgs, Opcode.I32Ne, ins.left, ins.right); break;
+    case 'And32': encodeBinaryIns(args, opArgs, Opcode.I32And, ins.left, ins.right); break;
+    case 'Or32': encodeBinaryIns(args, opArgs, Opcode.I32Or, ins.left, ins.right); break;
+    case 'Xor32': encodeBinaryIns(args, opArgs, Opcode.I32Xor, ins.left, ins.right); break;
+    case 'Add32': encodeBinaryIns(args, opArgs, Opcode.I32Add, ins.left, ins.right); break;
+    case 'Sub32': encodeBinaryIns(args, opArgs, Opcode.I32Sub, ins.left, ins.right); break;
+    case 'Mul32': encodeBinaryIns(args, opArgs, Opcode.I32Mul, ins.left, ins.right); break;
+    case 'Div32S': encodeBinaryIns(args, opArgs, Opcode.I32DivS, ins.left, ins.right); break;
+    case 'Div32U': encodeBinaryIns(args, opArgs, Opcode.I32DivU, ins.left, ins.right); break;
+
+    case 'Lt32S': encodeCompareIns(args, opArgs, ins.left, ins.right, Opcode.I32LtS, Opcode.I32GtS); break;
+    case 'Lt32U': encodeCompareIns(args, opArgs, ins.left, ins.right, Opcode.I32LtU, Opcode.I32GtU); break;
+    case 'LtEq32S': encodeCompareIns(args, opArgs, ins.left, ins.right, Opcode.I32LeS, Opcode.I32GeS); break;
+    case 'LtEq32U': encodeCompareIns(args, opArgs, ins.left, ins.right, Opcode.I32LeU, Opcode.I32GeU); break;
+
+    default: {
+      const checkCovered: void = ins;
+      throw new Error('Internal error');
+    }
+  }
+}
+
+function encodeBinaryIns(
+  args: InsRef[],
+  opArgs: OpArg[],
+  op: Opcode,
+  left: InsRef,
+  right: InsRef,
+): void {
+  opArgs.push({op, arg: null});
+  args.push(left, right);
+}
+
+function encodeCompareIns(
+  args: InsRef[],
+  opArgs: OpArg[],
+  left: InsRef,
+  right: InsRef,
+  ltr: Opcode,
+  rtl: Opcode,
+): void {
+  const leftIndex = getIndex(left);
+  const rightIndex = getIndex(right);
+
+  // Right-to-left
+  if (leftIndex !== null && rightIndex !== null && leftIndex > rightIndex) {
+    opArgs.push({op: rtl, arg: null});
+    args.push(right, left);
   }
 
-  function visitBlock(blockIndex: number): void {
-    function visitIns(): void {
-      const ins = block.insList[insIndex];
-      const args: InsRef[] = [];
+  // Left-to-right
+  else {
+    opArgs.push({op: ltr, arg: null});
+    args.push(left, right);
+  }
+}
 
-      switch (ins.kind) {
-        case 'Call':
-          throw new Error('Not yet implemented');
+interface Locals {
+  types: Type[];
+  argCount: number;
+  blockIndex: number;
+  localForIns: Map<number, number>;
+}
 
-        case 'PtrGlobal':
-        case 'PtrStack':
-          throw new Error('Not yet implemented');
+function createLocals(func: Func): Locals {
+  return {
+    types: func.locals.map(rawTypeToType),
+    argCount: func.argTypes.length,
+    blockIndex: -1,
+    localForIns: new Map,
+  };
+}
 
-        case 'MemAlloc':
-        case 'MemFree':
-        case 'MemCopy':
-          throw new Error('Not yet implemented');
-
-        case 'MemGet8':
-        case 'MemSet8':
-        case 'MemGet32':
-        case 'MemSet32':
-          throw new Error('Not yet implemented');
-
-        case 'LocalGet':
-          opArgs.push({op: Opcode.GetLocal, arg: ins.local});
-          break;
-
-        case 'LocalSet':
-          if (opArgs.length > 0) {
-            const last = opArgs[opArgs.length - 1];
-            if (last.op === Opcode.GetLocal && last.arg === ins.local) {
-              last.op = Opcode.TeeLocal;
-              break;
-            }
-          }
-          opArgs.push({op: Opcode.SetLocal, arg: ins.local});
-          args.push(ins.value);
-          break;
-
-        case 'Retain':
-        case 'Release':
-          throw new Error('Not yet implemented');
-
-        case 'Eq32': {
-          const leftConst = getConstant(func, ins.left);
-          const rightConst = getConstant(func, ins.right);
-          if (leftConst === 0) {
-            opArgs.push({op: Opcode.I32Eqz, arg: null});
-            args.push(ins.right);
-          } else if (rightConst === 0) {
-            opArgs.push({op: Opcode.I32Eqz, arg: null});
-            args.push(ins.left);
-          } else {
-            opArgs.push({op: Opcode.I32Eq, arg: null});
-            args.push(ins.left, ins.right);
-          }
-          break;
-        }
-
-        case 'NotEq32':
-          opArgs.push({op: Opcode.I32Ne, arg: null});
-          args.push(ins.left, ins.right);
-          break;
-
-        case 'Lt32S':
-          visitCompareIns(args, ins.left, ins.right, Opcode.I32LtS, Opcode.I32GtS);
-          break;
-
-        case 'Lt32U':
-          visitCompareIns(args, ins.left, ins.right, Opcode.I32LtU, Opcode.I32GtU);
-          break;
-
-        case 'LtEq32S':
-          visitCompareIns(args, ins.left, ins.right, Opcode.I32LeS, Opcode.I32GeS);
-          break;
-
-        case 'LtEq32U':
-          visitCompareIns(args, ins.left, ins.right, Opcode.I32LeU, Opcode.I32GeU);
-          break;
-
-        case 'And32':
-          opArgs.push({op: Opcode.I32And, arg: null});
-          args.push(ins.left, ins.right);
-          break;
-
-        case 'Or32':
-          opArgs.push({op: Opcode.I32Or, arg: null});
-          args.push(ins.left, ins.right);
-          break;
-
-        case 'Xor32':
-          opArgs.push({op: Opcode.I32Xor, arg: null});
-          args.push(ins.left, ins.right);
-          break;
-
-        case 'Add32':
-          opArgs.push({op: Opcode.I32Add, arg: null});
-          args.push(ins.left, ins.right);
-          break;
-
-        case 'Sub32':
-          opArgs.push({op: Opcode.I32Sub, arg: null});
-          args.push(ins.left, ins.right);
-          break;
-
-        case 'Mul32':
-          opArgs.push({op: Opcode.I32Mul, arg: null});
-          args.push(ins.left, ins.right);
-          break;
-
-        case 'Div32S':
-          opArgs.push({op: Opcode.I32DivS, arg: null});
-          args.push(ins.left, ins.right);
-          break;
-
-        case 'Div32U':
-          opArgs.push({op: Opcode.I32DivU, arg: null});
-          args.push(ins.left, ins.right);
-          break;
-
-        default: {
-          const checkCovered: void = ins;
-          throw new Error('Internal error');
-        }
-      }
-
-      for (let i = args.length - 1; i >= 0; i--) {
-        const arg = args[i];
-        const constant = getConstant(func, arg);
-
-        // Is this a constant? If so, add it directly.
-        if (constant !== null) {
-          opArgs.push({op: Opcode.I32Const, arg: constant});
-        }
-
-        // If this argument is a single-use value immediately
-        // before this instruction, inline that value too
-        else if (uses[arg.index] === 1 && arg.index === insIndex - 1) {
-          insIndex--;
-          visitIns();
-        }
-
-        // Otherwise this value will have to be generated separately,
-        // saved to a local, and then loaded from a local here
-        else {
-          opArgs.push({
-            op: Opcode.GetLocal,
-            arg: makeTemporary(arg.index, rawTypeToType(typeOf(func, blockIndex, {index: arg.index}))),
-          });
-        }
-      }
+function createTemporary(locals: Locals, blockIndex: number, insIndex: number, type: RawType): number {
+  if (locals.blockIndex === blockIndex) {
+    const index = locals.localForIns.get(insIndex);
+    if (index !== undefined) {
+      return index;
     }
-
-    function visitCompareIns(args: InsRef[], left: InsRef, right: InsRef, ltr: Opcode, rtl: Opcode): void {
-      const leftIndex = getIndex(left);
-      const rightIndex = getIndex(right);
-
-      // Right-to-left
-      if (leftIndex !== null && rightIndex !== null && leftIndex > rightIndex) {
-        opArgs.push({op: rtl, arg: null});
-        args.push(right, left);
-      }
-
-      // Left-to-right
-      else {
-        opArgs.push({op: ltr, arg: null});
-        args.push(left, right);
-      }
-    }
-
-    function makeTemporary(index: number, type: Type): number {
-      const existing = insTemp.get(index);
-      if (existing !== undefined) {
-        return existing;
-      }
-
-      let count = tempCount.get(type);
-      if (count === undefined) count = 0;
-
-      let temps = temporaries.get(type);
-      if (temps === undefined) {
-        temps = [];
-        temporaries.set(type, temps);
-      }
-
-      if (count < temps.length) {
-        const local = temps[count];
-        insTemp.set(index, local);
-        return local;
-      }
-
-      const local = locals.length;
-      locals.push(type);
-      temps.push(local);
-      insTemp.set(index, local);
-      tempCount.set(type, temps.length);
-      return local;
-    }
-
-    const block = func.blocks[blockIndex];
-    const uses = countUses(block);
-    const opArgs: OpArg[] = [];
-    let insIndex = block.insList.length;
-
-    // Maps instruction indices to the local variable for
-    // that instruction (an index into "locals" below)
-    const insTemp = new Map<number, number>();
-
-    // Maps instruction types to how many temporaries of
-    // that type we have used so far
-    const tempCount = new Map<Type, number>();
-
-    if (block.jump.kind === 'Return') {
-      // TODO: make sure "block.jump.value" is returned
-    }
-
-    while (insIndex > 0) {
-      insIndex--;
-
-      const local = insTemp.get(insIndex);
-      if (local !== undefined) {
-        if (opArgs.length > 0) {
-          const last = opArgs[opArgs.length - 1];
-          if (last.op === Opcode.GetLocal && last.arg === local) {
-            last.op = Opcode.TeeLocal;
-            visitIns();
-            continue;
-          }
-        }
-
-        opArgs.push({op: Opcode.SetLocal, arg: local});
-      }
-
-      visitIns();
-      // TODO: may need a "drop" here
-    }
-
-    blocks.push(opArgs);
+  } else {
+    locals.blockIndex = blockIndex;
+    locals.localForIns = new Map;
   }
 
-  // Maps instruction types to an array of newly-generated
-  // local variables for that type (indices into "locals"
-  // below). The array is meant to be reused across basic
-  // blocks since the temporaries are local to each block.
-  const temporaries = new Map<Type, number[]>();
+  const localIndex = locals.types.length;
+  locals.types.push(rawTypeToType(type));
+  locals.localForIns.set(insIndex, localIndex);
+  return localIndex;
+}
 
-  const locals: Type[] = func.locals.map(rawTypeToType);
-  const blocks: OpArg[][] = [];
-  visitBlock(0);
+function getTemporary(locals: Locals, blockIndex: number, insIndex: number): number | null {
+  if (locals.blockIndex === blockIndex) {
+    const index = locals.localForIns.get(insIndex);
+    if (index !== undefined) {
+      return index;
+    }
+  }
+  return null;
+}
+
+function finishLocals(locals: Locals, bb: ByteBuffer): number[] {
+  const {argCount, types} = locals;
 
   // Count the number of locals in each type
   let i32Count = 0;
   let i64Count = 0;
-  for (const local of locals) {
-    if (local === Type.I64) i64Count++;
+  for (let i = locals.argCount; i < types.length; i++) {
+    if (types[i] === Type.I64) i64Count++;
     else i32Count++;
-  }
-
-  // Remap locals into runs of the same type
-  let i32Next = 0;
-  let i64Next = i32Count;
-  const remap: number[] = [];
-  for (const local of locals) {
-    remap.push(local === Type.I64 ? i64Next++ : i32Next++);
   }
 
   // Write out the locals
@@ -683,28 +582,163 @@ function encodeFunc(func: Func, bb: ByteBuffer): void {
     bb.writeVarS(Type.I64);
   }
 
+  // Remap locals into runs of the same type
+  const remap: number[] = [];
+  for (let i = 0; i < locals.argCount; i++) {
+    remap.push(i);
+  }
+  let i32Next = locals.argCount;
+  let i64Next = i32Count;
+  for (let i = locals.argCount; i < types.length; i++) {
+    remap.push(types[i] === Type.I64 ? i64Next++ : i32Next++);
+  }
+  return remap;
+}
+
+interface BlockContext {
+  func: Func;
+  locals: Locals;
+  uses: number[];
+  opArgs: OpArg[];
+  blockIndex: number;
+  insIndex: number;
+}
+
+function visitIns(context: BlockContext): void {
+  const block = context.func.blocks[context.blockIndex];
+  const args: InsRef[] = [];
+  encodeIns(context.func, args, context.opArgs, block.insList[context.insIndex]);
+
+  // Encode the args in reverse because we're encoding from the bottom up
+  for (let i = args.length - 1; i >= 0; i--) {
+    visitArg(context, args[i]);
+  }
+}
+
+function visitArg(context: BlockContext, arg: InsRef): void {
+  const constant = getConstant(context.func, arg);
+
+  // Is this a constant? If so, add it directly.
+  if (constant !== null) {
+    context.opArgs.push({op: Opcode.I32Const, arg: constant});
+  }
+
+  // If this argument is a single-use value immediately
+  // before this instruction, inline that value too
+  else if (context.uses[arg.index] === 1 && arg.index === context.insIndex - 1) {
+    context.insIndex--;
+    visitIns(context);
+  }
+
+  // Otherwise this value will have to be generated separately,
+  // saved to a local, and then loaded from a local here
+  else {
+    const type = typeOf(context.func, context.blockIndex, {index: arg.index});
+    context.opArgs.push({
+      op: Opcode.GetLocal,
+      arg: createTemporary(context.locals, context.blockIndex, arg.index, type),
+    });
+  }
+}
+
+function encodeFunc(func: Func, bb: ByteBuffer): void {
+  function visitBlock(blockIndex: number): void {
+    const block = func.blocks[blockIndex];
+    const context: BlockContext = {
+      func,
+      locals,
+      opArgs: [],
+      uses: countUses(block),
+      blockIndex,
+      insIndex: block.insList.length,
+    };
+
+    // The last instruction may be needed by the jump
+    if (block.jump.kind === 'Return') {
+      context.opArgs.push({op: Opcode.Return, arg: null});
+      visitArg(context, block.jump.value);
+    }
+
+    while (context.insIndex > 0) {
+      context.insIndex--;
+
+      // If this was referenced by a later instruction, store the result of
+      // this instruction in a variable so that later instruction can use it
+      const local = getTemporary(locals, blockIndex, context.insIndex);
+      if (local !== null) {
+        const lastIndex = context.opArgs.length - 1;
+        if (lastIndex >= 0) {
+          const last = context.opArgs[lastIndex];
+
+          // If the immediate next instruction is going to load the value that
+          // we're about to store, turn the store and load pair into a "tee"
+          // since it does the same thing while using slightly less space
+          if (last.op === Opcode.GetLocal && last.arg === local) {
+            last.op = Opcode.TeeLocal;
+            visitIns(context);
+            continue;
+          }
+        }
+        context.opArgs.push({op: Opcode.SetLocal, arg: local});
+      }
+
+      visitIns(context);
+      // TODO: may need a "drop" here
+    }
+
+    switch (block.jump.kind) {
+      case 'ReturnVoid':
+        break;
+
+      case 'Return':
+        break;
+
+      case 'Missing':
+        break;
+
+      case 'Goto':
+        break;
+
+      case 'Branch':
+        break;
+
+      default: {
+        const checkCovered: void = block.jump;
+        throw new Error('Internal error');
+      }
+    }
+
+    blocks.push(context.opArgs);
+  }
+
+  const locals = createLocals(func);
+  const blocks: OpArg[][] = [];
+  visitBlock(0);
+
   // Generate the function body
+  const remap = finishLocals(locals, bb);
   for (const block of blocks) {
     for (let i = block.length - 1; i >= 0; i--) {
       const opArg = block[i];
       bb.writeByte(opArg.op);
-      if (opArg.arg === null) continue;
 
-      switch (opArg.op) {
-        case Opcode.GetLocal:
-        case Opcode.SetLocal:
-        case Opcode.TeeLocal:
-          bb.writeVarU(remap[opArg.arg]);
-          break;
+      if (opArg.arg !== null) {
+        switch (opArg.op) {
+          case Opcode.GetLocal:
+          case Opcode.SetLocal:
+          case Opcode.TeeLocal:
+            bb.writeVarU(remap[opArg.arg]);
+            break;
 
-        case Opcode.I32Const:
-        case Opcode.I64Const:
-          bb.writeVarS(opArg.arg);
-          break;
+          case Opcode.I32Const:
+          case Opcode.I64Const:
+            bb.writeVarS(opArg.arg);
+            break;
 
-        default:
-          bb.writeVarU(opArg.arg);
-          break;
+          default:
+            bb.writeVarU(opArg.arg);
+            break;
+        }
       }
     }
   }
