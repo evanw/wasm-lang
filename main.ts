@@ -34,7 +34,7 @@ def _malloc(size int) int {
     }
 
     # Ask for more pages
-    var pages = (_end - (_ptr + size) + (1 << 16) - 1) >> 16
+    var pages = (_ptr + size - _end + (1 << 16) - 1) >> 16
     if _growMemory(pages) == -1 {
       _abort()
     }
