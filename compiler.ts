@@ -343,6 +343,7 @@ function getStringArg(context: Context, tag: Tag): string | null {
 }
 
 function compileDefs(context: Context, parsed: Parsed): void {
+  const exportNames = new Set<string>();
   const list: [number, DefDecl][] = [];
 
   // Resolve all argument types and return types
@@ -356,6 +357,7 @@ function compileDefs(context: Context, parsed: Parsed): void {
     const tag = getFirstTag(context, def.tags);
     let intrinsicName: string | null = null;
     let importName: string | null = null;
+    let exportName: string | null = null;
     let kind: DefKind;
 
     // Try to resolve the intrinsic name
@@ -364,6 +366,18 @@ function compileDefs(context: Context, parsed: Parsed): void {
         intrinsicName = getStringArg(context, tag);
       } else if (tag.name === "import") {
         importName = getStringArg(context, tag);
+      } else if (tag.name === "export") {
+        exportName = getStringArg(context, tag);
+
+        // Check for duplicate export names
+        if (exportName !== null) {
+          if (exportNames.has(exportName)) {
+            appendToLog(context.log, tag.range, `The export name "${exportName}" has already been used`);
+            exportName = null;
+          } else {
+            exportNames.add(exportName);
+          }
+        }
       } else {
         appendToLog(context.log, tag.range, `Use of unknown tag "${tag.name}"`);
       }
@@ -394,6 +408,7 @@ function compileDefs(context: Context, parsed: Parsed): void {
       const func = createFunc(def.name, context.ptrType);
       const index = context.code.funcs.length;
       kind = {kind: 'Func', index};
+      func.exportName = exportName;
       context.code.funcs.push(func);
       if (def.body === null) {
         appendToLog(context.log, def.nameRange, `Must implement "${def.name}"`);

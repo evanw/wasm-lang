@@ -455,15 +455,16 @@ export function encodeWASM(code: Code): Uint8Array {
 
   // Write the "exports" section
   const exportBB = new ByteBuffer;
-  const exported: number[] = [];
+  const exported: [number, string][] = [];
   for (let i = 0; i < code.funcs.length; i++) {
-    if (!code.funcs[i].name.startsWith('_')) {
-      exported.push(i);
+    const name = code.funcs[i].exportName;
+    if (name !== null) {
+      exported.push([i, name]);
     }
   }
   exportBB.writeVarU(exported.length);
-  for (const i of exported) {
-    const utf8 = new Buffer(code.funcs[i].name);
+  for (const [i, name] of exported) {
+    const utf8 = new Buffer(name);
     exportBB.writeVarU(utf8.length);
     exportBB.writeBytes(utf8);
     exportBB.writeByte(ExternalKind.Function);

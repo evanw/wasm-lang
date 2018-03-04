@@ -116,6 +116,7 @@ export interface BasicBlock {
 
 export interface Func {
   name: string;
+  exportName: string | null;
   argTypes: RawType[];
   retType: RawType;
   blocks: BasicBlock[];
@@ -165,6 +166,7 @@ export function createCode(): Code {
 export function createFunc(name: string, ptrType: RawType): Func {
   return {
     name,
+    exportName: null,
     argTypes: [],
     retType: RawType.Void,
     ptrType,
