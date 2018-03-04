@@ -417,9 +417,6 @@ interface OpArg {
 
 function encodeIns(func: Func, args: InsRef[], opArgs: OpArg[], ins: Ins): void {
   switch (ins.kind) {
-    case 'Call':
-      throw new Error('Not yet implemented');
-
     case 'PtrGlobal':
     case 'PtrStack':
       throw new Error('Not yet implemented');
@@ -434,6 +431,11 @@ function encodeIns(func: Func, args: InsRef[], opArgs: OpArg[], ins: Ins): void 
     case 'MemGet32':
     case 'MemSet32':
       throw new Error('Not yet implemented');
+
+    case 'Call':
+      opArgs.push({op: Opcode.Call, arg: ins.index});
+      args.push(...ins.args);
+      break;
 
     case 'LocalGet':
       opArgs.push({op: Opcode.GetLocal, arg: ins.local});

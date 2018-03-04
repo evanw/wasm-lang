@@ -22,7 +22,11 @@ export async function main(): Promise<void> {
     require('fs').writeFileSync('example.wasm', wasm);
     const {instance} = await WebAssembly.instantiate(wasm);
     console.log(instance);
-    console.log(instance.exports.main(1, 2));
+    const start = Date.now();
+    console.log(instance.exports.fib(34));
+    console.log('5702887');
+    const end = Date.now();
+    console.log('time:', ((end - start) / 1000).toFixed(3) + 's');
   } else {
     console.log('done');
   }
