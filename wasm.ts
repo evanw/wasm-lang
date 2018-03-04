@@ -1,4 +1,17 @@
-import { Code, RawType, Func, InsRef, getConstant, getIndex, countUses, typeOf, Ins } from './ssa';
+import {
+  BlockMeta,
+  buildBlockMetas,
+  Code,
+  countUses,
+  Func,
+  getConstant,
+  getIndex,
+  Ins,
+  InsRef,
+  JumpTarget,
+  RawType,
+  typeOf,
+} from './ssa';
 
 declare const Buffer: any;
 
@@ -30,6 +43,7 @@ enum Type {
   F64 = -0x04,
   AnyFunc = -0x10,
   Func = -0x20,
+  Empty = -0x40,
 }
 
 enum Opcode {
@@ -547,7 +561,7 @@ function createTemporary(locals: Locals, blockIndex: number, insIndex: number, t
   return localIndex;
 }
 
-function getTemporary(locals: Locals, blockIndex: number, insIndex: number): number | null {
+function checkForTemporary(locals: Locals, blockIndex: number, insIndex: number): number | null {
   if (locals.blockIndex === blockIndex) {
     const index = locals.localForIns.get(insIndex);
     if (index !== undefined) {
@@ -641,105 +655,219 @@ function visitArg(context: BlockContext, arg: InsRef): void {
   }
 }
 
-function encodeFunc(func: Func, bb: ByteBuffer): void {
-  function visitBlock(blockIndex: number): void {
-    const block = func.blocks[blockIndex];
-    const context: BlockContext = {
-      func,
-      locals,
-      opArgs: [],
-      uses: countUses(block),
-      blockIndex,
-      insIndex: block.insList.length,
-    };
+interface StackEntry {
+  blockIndex: number;
+  isLoop: boolean;
+}
 
-    // The last instruction may be needed by the jump
-    if (block.jump.kind === 'Return') {
-      context.opArgs.push({op: Opcode.Return, arg: null});
+function encodeBlockTree(
+  func: Func,
+  locals: Locals,
+  metas: BlockMeta[],
+  stack: StackEntry[],
+  stream: OpArg[],
+  blockIndex: number,
+): void {
+  const block = func.blocks[blockIndex];
+  const opArgs: OpArg[] = [];
+  const context: BlockContext = {
+    func,
+    locals,
+    opArgs,
+    uses: countUses(block),
+    blockIndex,
+    insIndex: block.insList.length,
+  };
+
+  // The last instruction may be needed by the jump
+  switch (block.jump.kind) {
+    case 'Return':
       visitArg(context, block.jump.value);
-    }
+      break;
 
-    while (context.insIndex > 0) {
-      context.insIndex--;
-
-      // If this was referenced by a later instruction, store the result of
-      // this instruction in a variable so that later instruction can use it
-      const local = getTemporary(locals, blockIndex, context.insIndex);
-      if (local !== null) {
-        const lastIndex = context.opArgs.length - 1;
-        if (lastIndex >= 0) {
-          const last = context.opArgs[lastIndex];
-
-          // If the immediate next instruction is going to load the value that
-          // we're about to store, turn the store and load pair into a "tee"
-          // since it does the same thing while using slightly less space
-          if (last.op === Opcode.GetLocal && last.arg === local) {
-            last.op = Opcode.TeeLocal;
-            visitIns(context);
-            continue;
-          }
-        }
-        context.opArgs.push({op: Opcode.SetLocal, arg: local});
-      }
-
-      visitIns(context);
-      // TODO: may need a "drop" here
-    }
-
-    switch (block.jump.kind) {
-      case 'ReturnVoid':
-        break;
-
-      case 'Return':
-        break;
-
-      case 'Missing':
-        break;
-
-      case 'Goto':
-        break;
-
-      case 'Branch':
-        break;
-
-      default: {
-        const checkCovered: void = block.jump;
-        throw new Error('Internal error');
-      }
-    }
-
-    blocks.push(context.opArgs);
+    case 'Branch':
+      visitArg(context, block.jump.value);
+      break;
   }
 
-  const locals = createLocals(func);
-  const blocks: OpArg[][] = [];
-  visitBlock(0);
+  // Iterate over the block from bottom to top attempting to "stackify"
+  // adjacent expressions into something resembling expression trees.
+  // WebAssembly is encoded using a stack-based format for size reasons.
+  while (context.insIndex > 0) {
+    context.insIndex--;
 
-  // Generate the function body
-  const remap = finishLocals(locals, bb);
-  for (const block of blocks) {
-    for (let i = block.length - 1; i >= 0; i--) {
-      const opArg = block[i];
-      bb.writeByte(opArg.op);
+    // If this was referenced by a later instruction, store the result of
+    // this instruction in a variable so that later instruction can use it.
+    const local = checkForTemporary(locals, blockIndex, context.insIndex);
+    if (local !== null) {
+      const lastIndex = opArgs.length - 1;
+      if (lastIndex >= 0) {
+        const last = opArgs[lastIndex];
 
-      if (opArg.arg !== null) {
-        switch (opArg.op) {
-          case Opcode.GetLocal:
-          case Opcode.SetLocal:
-          case Opcode.TeeLocal:
-            bb.writeVarU(remap[opArg.arg]);
-            break;
-
-          case Opcode.I32Const:
-          case Opcode.I64Const:
-            bb.writeVarS(opArg.arg);
-            break;
-
-          default:
-            bb.writeVarU(opArg.arg);
-            break;
+        // If the immediate next instruction is going to load the value that
+        // we're about to store, turn the store and load pair into a "tee"
+        // since it does the same thing while using slightly less space.
+        if (last.op === Opcode.GetLocal && last.arg === local) {
+          last.op = Opcode.TeeLocal;
+          visitIns(context);
+          continue;
         }
       }
+      opArgs.push({op: Opcode.SetLocal, arg: local});
+    }
+
+    visitIns(context);
+    // TODO: may need a "drop" here
+  }
+
+  // Wrap loops in a special label
+  const isLoop = metas[blockIndex].isLoopTarget;
+  if (isLoop) {
+    stream.push({op: Opcode.Block, arg: Type.Empty});
+    stream.push({op: Opcode.Loop, arg: Type.Empty});
+    stack.push({blockIndex, isLoop: false});
+    stack.push({blockIndex, isLoop: true});
+  }
+
+  // Now we have a reversed array of WebAssembly instructions for this block.
+  // Iterate over that in reverse so that they are all written out forwards.
+  for (let i = opArgs.length - 1; i >= 0; i--) {
+    stream.push(opArgs[i]);
+  }
+
+  switch (block.jump.kind) {
+    case 'Missing':
+      break;
+
+    case 'ReturnVoid':
+    case 'Return':
+      stream.push({op: Opcode.Return, arg: null});
+      break;
+
+    case 'Branch': {
+      const {yes, no} = block.jump;
+      stack.push({blockIndex, isLoop: false});
+      stream.push({op: Opcode.If, arg: Type.Empty});
+      encodeJumpTarget(func, locals, metas, stack, stream, yes);
+      if (no.kind !== 'Next' || no.parent !== blockIndex) {
+        stream.push({op: Opcode.Else, arg: null});
+        encodeJumpTarget(func, locals, metas, stack, stream, no);
+      }
+      stream.push({op: Opcode.End, arg: null});
+      stack.pop();
+      break;
+    }
+
+    case 'Goto':
+      stack.push({blockIndex, isLoop: false});
+      stream.push({op: Opcode.Block, arg: Type.Empty});
+      encodeJumpTarget(func, locals, metas, stack, stream, block.jump.target);
+      stream.push({op: Opcode.End, arg: null});
+      stack.pop();
+      break;
+
+    default: {
+      const checkCovered: void = block.jump;
+      throw new Error('Internal error');
+    }
+  }
+
+  // End any control flow constructs we created above
+  if (isLoop) {
+    stream.push({op: Opcode.End, arg: null});
+    stream.push({op: Opcode.End, arg: null});
+    stack.pop();
+    stack.pop();
+  }
+
+  // Only encode the next block if something jumps to it
+  if (block.next !== null && metas[blockIndex].isNextTarget) {
+    encodeBlockTree(func, locals, metas, stack, stream, block.next);
+  }
+}
+
+function encodeJumpTarget(
+  func: Func,
+  locals: Locals,
+  metas: BlockMeta[],
+  stack: StackEntry[],
+  stream: OpArg[],
+  target: JumpTarget,
+): void {
+  let parent: StackEntry | null = null;
+
+  switch (target.kind) {
+    case 'Child':
+      encodeBlockTree(func, locals, metas, stack, stream, target.index);
+      return;
+
+    case 'Next':
+      parent = {blockIndex: target.parent, isLoop: false};
+      break;
+
+    case 'Loop':
+      parent = {blockIndex: target.parent, isLoop: true};
+      break;
+
+    default: {
+      const checkCovered: void = target;
+      throw new Error('Internal error');
+    }
+  }
+
+  // Search the stack bottom to top since loops will have two stack entries
+  // with "isLoop: false" and we want the older one (the one outside the loop)
+  for (let i = 0; i < stack.length; i++) {
+    const entry = stack[i];
+
+    if (entry.blockIndex === parent.blockIndex && entry.isLoop === parent.isLoop) {
+      stream.push({op: Opcode.Br, arg: stack.length - i - 1});
+      return;
+    }
+  }
+
+  throw new Error('Internal error');
+}
+
+function encodeFunc(func: Func, bb: ByteBuffer): void {
+  // Generate the instructions
+  const metas = buildBlockMetas(func);
+  const locals = createLocals(func);
+  const stream: OpArg[] = [];
+  const stack: StackEntry[] = [];
+  encodeBlockTree(func, locals, metas, stack, stream, 0);
+
+  // Write the function body
+  const remap = finishLocals(locals, bb);
+  console.log(`func ${func.name}:`);
+  for (const opArg of stream) {
+    bb.writeByte(opArg.op);
+
+    if (opArg.arg !== null) {
+      switch (opArg.op) {
+        case Opcode.GetLocal:
+        case Opcode.SetLocal:
+        case Opcode.TeeLocal:
+          bb.writeVarU(remap[opArg.arg]);
+          console.log(`  ${Opcode[opArg.op]} ${remap[opArg.arg]}`);
+          break;
+
+        case Opcode.I32Const:
+        case Opcode.I64Const:
+        case Opcode.If:
+        case Opcode.Loop:
+        case Opcode.Block:
+          bb.writeVarS(opArg.arg);
+          console.log(`  ${Opcode[opArg.op]} ${opArg.arg}`);
+          break;
+
+        default:
+          bb.writeVarU(opArg.arg);
+          console.log(`  ${Opcode[opArg.op]} ${opArg.arg}`);
+          break;
+      }
+    } else {
+      console.log(`  ${Opcode[opArg.op]}`);
     }
   }
 

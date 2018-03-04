@@ -558,11 +558,10 @@ export interface BlockMeta {
   isLive: boolean;
   isNextTarget: boolean;
   isLoopTarget: boolean;
-  isNestedNextTarget: boolean;
-  isNestedLoopTarget: boolean;
 }
 
 export function buildBlockMetas(func: Func): BlockMeta[] {
+  const stack: number[] = []; // TODO: Either use this or remove it
   const metas: BlockMeta[] = [];
 
   for (const block of func.blocks) {
@@ -570,20 +569,19 @@ export function buildBlockMetas(func: Func): BlockMeta[] {
       isLive: false,
       isNextTarget: false,
       isLoopTarget: false,
-      isNestedNextTarget: false,
-      isNestedLoopTarget: false,
     });
   }
 
-  visitBlock(func, metas, 0);
+  visitBlockTree(func, metas, stack, 0);
   return metas;
 }
 
-function visitBlock(func: Func, metas: BlockMeta[], index: number): void {
+function visitBlockTree(func: Func, metas: BlockMeta[], stack: number[], index: number): void {
   const block = func.blocks[index];
   const meta = metas[index];
   meta.isLive = true;
 
+  stack.push(index);
   switch (block.jump.kind) {
     case 'Missing':
     case 'Return':
@@ -591,12 +589,12 @@ function visitBlock(func: Func, metas: BlockMeta[], index: number): void {
       break;
 
     case 'Goto':
-      visitJumpTarget(func, metas, index, block.jump.target);
+      visitJumpTarget(func, metas, stack, block.jump.target);
       break;
 
     case 'Branch':
-      visitJumpTarget(func, metas, index, block.jump.yes);
-      visitJumpTarget(func, metas, index, block.jump.no);
+      visitJumpTarget(func, metas, stack, block.jump.yes);
+      visitJumpTarget(func, metas, stack, block.jump.no);
       break;
 
     default: {
@@ -604,34 +602,29 @@ function visitBlock(func: Func, metas: BlockMeta[], index: number): void {
       throw new Error('Internal error');
     }
   }
+  stack.pop();
 
   // Only visit our sibling if we or one of our children jumps to it
   if (block.next !== null && meta.isNextTarget) {
-    visitBlock(func, metas, block.next);
+    visitBlockTree(func, metas, stack, block.next);
   }
 }
 
-function visitJumpTarget(func: Func, metas: BlockMeta[], index: number, target: JumpTarget): void {
+function visitJumpTarget(func: Func, metas: BlockMeta[], stack: number[], target: JumpTarget): void {
   switch (target.kind) {
     case 'Child':
-      visitBlock(func, metas, target.index);
+      visitBlockTree(func, metas, stack, target.index);
       break;
 
     case 'Next': {
       const meta = metas[target.parent];
       meta.isNextTarget = true;
-      if (target.parent !== index) {
-        meta.isNestedNextTarget = true;
-      }
       break;
     }
 
     case 'Loop': {
       const meta = metas[target.parent];
       meta.isLoopTarget = true;
-      if (target.parent !== index) {
-        meta.isNestedLoopTarget = true;
-      }
       break;
     }
 
