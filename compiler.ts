@@ -83,6 +83,14 @@ interface VarData {
   index: number;
 }
 
+interface GlobalScope {
+  // All truely global variables go here
+  globals: Map<string, GlobalRef>;
+
+  // All module-level variables (starting with "_") go here instead
+  modules: Map<number, Map<string, GlobalRef>>;
+}
+
 interface Context {
   code: Code;
   log: Log;
@@ -90,7 +98,7 @@ interface Context {
   types: TypeData[];
   defs: DefData[];
   vars: VarData[];
-  globalScope: Map<string, GlobalRef>;
+  globalScope: GlobalScope;
 
   // Function-specific temporaries
   currentBlock: number;
@@ -104,13 +112,41 @@ interface Context {
   stringTypeID: TypeID;
 }
 
+function findGlobal(scope: GlobalScope, source: number, name: string): GlobalRef | null {
+  const map = scope.modules.get(source);
+  if (map !== undefined) {
+    const ref = map.get(name);
+    if (ref !== undefined) {
+      return ref;
+    }
+  }
+
+  const ref = scope.globals.get(name);
+  if (ref !== undefined) {
+    return ref;
+  }
+
+  return null;
+}
+
 function defineGlobal(context: Context, range: Range, name: string, ref: GlobalRef): boolean {
-  if (context.globalScope.get(name) !== undefined) {
+  if (findGlobal(context.globalScope, range.source, name) !== null) {
     appendToLog(context.log, range, `The name "${name}" is already used`);
     return false;
   }
 
-  context.globalScope.set(name, ref);
+  if (!name.startsWith('_')) {
+    context.globalScope.globals.set(name, ref);
+    return true;
+  }
+
+  let map = context.globalScope.modules.get(range.source);
+  if (map === undefined) {
+    map = new Map;
+    context.globalScope.modules.set(range.source, map);
+  }
+
+  map.set(name, ref);
   return true;
 }
 
@@ -148,10 +184,10 @@ function resolveTypeExpr(context: Context, type: TypeExpr): TypeID {
 }
 
 function resolveTypeName(context: Context, range: Range, name: string): TypeID {
-  const ref = context.globalScope.get(name);
+  const ref = findGlobal(context.globalScope, range.source, name);
 
   // Check that the name exists
-  if (ref === undefined) {
+  if (ref === null) {
     appendToLog(context.log, range, `There is no type named "${name}"`);
     return context.errorTypeID;
   }
@@ -506,8 +542,8 @@ function compileStmts(context: Context, stmts: Stmt[], func: Func, parent: Scope
         }
 
         // Check for a global next
-        const global = context.globalScope.get(name);
-        if (global !== undefined) {
+        const global = findGlobal(context.globalScope, stmt.range.source, name);
+        if (global !== null) {
           if (global.kind === 'Var') {
             const data = context.vars[global.varID];
             const ptr = addIns(func, context.currentBlock, {kind: 'PtrGlobal', index: data.index});
@@ -677,8 +713,8 @@ function compileExpr(context: Context, expr: Expr, func: Func, scope: Scope, cas
       }
 
       // Check for a global next
-      let global = context.globalScope.get(name);
-      if (global !== undefined) {
+      let global = findGlobal(context.globalScope, expr.range.source, name);
+      if (global !== null) {
         global = forwardToDefaultCtor(context, global);
         if (global.kind === 'Ctor') {
           const type = context.types[global.typeID.index];
@@ -808,8 +844,8 @@ function compileExpr(context: Context, expr: Expr, func: Func, scope: Scope, cas
       }
 
       // Check for a global next
-      let global = context.globalScope.get(name);
-      if (global === undefined) {
+      let global = findGlobal(context.globalScope, expr.range.source, name);
+      if (global === null) {
         appendToLog(context.log, expr.kind.nameRange, `There is no symbol named "${name}" here`);
         break;
       }
@@ -1117,7 +1153,10 @@ export function compile(log: Log, parsed: Parsed, ptrType: RawType): Code {
     types: [],
     defs: [],
     vars: [],
-    globalScope: new Map(),
+    globalScope: {
+      globals: new Map,
+      modules: new Map,
+    },
 
     // Function-specific temporaries
     currentBlock: -1,

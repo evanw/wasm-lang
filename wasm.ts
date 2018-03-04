@@ -408,13 +408,19 @@ export function encodeWASM(code: Code): Uint8Array {
 
   // Write the "exports" section
   const exportBB = new ByteBuffer;
-  exportBB.writeVarU(code.funcs.length);
+  const exported: number[] = [];
   for (let i = 0; i < code.funcs.length; i++) {
+    if (!code.funcs[i].name.startsWith('_')) {
+      exported.push(i);
+    }
+  }
+  exportBB.writeVarU(exported.length);
+  for (const i of exported) {
     const utf8 = new Buffer(code.funcs[i].name);
     exportBB.writeVarU(utf8.length);
     exportBB.writeBytes(utf8);
     exportBB.writeByte(ExternalKind.Function);
-    exportBB.writeVarU(funcIndices[i]);
+    exportBB.writeVarU(i);
   }
   bb.writeSection(Section.Export, exportBB);
 
