@@ -20,7 +20,10 @@ import {
   setNext,
   unwrapRef,
   ValueRef,
+  addMemGet,
+  addMemSet,
 } from './ssa';
+import { assert } from './util';
 
 interface TypeID {
   index: number;
@@ -36,12 +39,28 @@ interface ArgData {
 interface CtorData {
   name: string;
   args: ArgData[];
+  fieldOffsets: number[];
 }
 
 interface TypeData {
   name: string;
   ctors: CtorData[];
   defaultCtor: number | null;
+
+  // This will be false for primitive types
+  hasRefCount: boolean;
+
+  // This will be null for types with less than 2 ctors
+  tagOffset: number | null;
+
+  // The size of a field of this type
+  fieldSize: number;
+
+  // The alignment of a field of this type
+  fieldAlign: number;
+
+  // How much the allocator must reserve for this type
+  allocSize: number;
 }
 
 interface DefData {
@@ -86,13 +105,22 @@ function defineGlobal(context: Context, range: Range, name: string, ref: GlobalR
   return true;
 }
 
-function addTypeID(context: Context, range: Range, name: string): TypeID {
+function addTypeID(context: Context, range: Range, name: string, fieldBytes: number): TypeID {
   const typeID: TypeID = {index: context.types.length};
   if (!defineGlobal(context, range, name, {kind: 'Type', typeID})) {
     return context.errorTypeID;
   }
 
-  context.types.push({name, ctors: [], defaultCtor: null});
+  context.types.push({
+    name,
+    ctors: [],
+    defaultCtor: null,
+    hasRefCount: true,
+    tagOffset: null,
+    fieldSize: fieldBytes,
+    fieldAlign: fieldBytes,
+    allocSize: 1,
+  });
   return typeID;
 }
 
@@ -135,13 +163,20 @@ function resolveTypeName(context: Context, range: Range, name: string): TypeID {
   return ref.typeID;
 }
 
+function align(value: number, align: number): number {
+  assert((align & (align - 1)) === 0); // Alignment must be a power of 2
+  value = (value + align - 1) & ~(align - 1);
+  return value;
+}
+
 function compileTypes(context: Context, parsed: Parsed): void {
+  const ptrBytes = context.ptrType === RawType.I64 ? 8 : 4;
   const list: [TypeID, CtorDecl[]][] = [];
 
   // Add type names first
   for (const decl of parsed.types) {
     if (decl.params.length === 0) {
-      const typeID = addTypeID(context, decl.nameRange, decl.name);
+      const typeID = addTypeID(context, decl.nameRange, decl.name, ptrBytes);
       if (typeID === context.errorTypeID) {
         continue;
       }
@@ -155,13 +190,13 @@ function compileTypes(context: Context, parsed: Parsed): void {
         // Allow one constructor to share the name of the type
         if (ctor.name === decl.name && data.defaultCtor === null) {
           data.defaultCtor = data.ctors.length;
-          data.ctors.push({name: ctor.name, args: []});
+          data.ctors.push({name: ctor.name, args: [], fieldOffsets: []});
           ctors.push(ctor);
         }
 
         // Otherwise the constructor must have a unique global name
         else if (defineGlobal(context, ctor.nameRange, ctor.name, {kind: 'Ctor', typeID, index})) {
-          data.ctors.push({name: ctor.name, args: []});
+          data.ctors.push({name: ctor.name, args: [], fieldOffsets: []});
           ctors.push(ctor);
         }
       }
@@ -175,19 +210,48 @@ function compileTypes(context: Context, parsed: Parsed): void {
   context.intTypeID = resolveTypeName(context, {source: -1, start: 0, end: 0}, 'int');
   context.stringTypeID = resolveTypeName(context, {source: -1, start: 0, end: 0}, 'string');
 
+  // Primitive types have a fixed size and are not reference counted
+  const intType = context.types[context.intTypeID.index];
+  const boolType = context.types[context.boolTypeID.index];
+  intType.fieldSize = intType.fieldAlign = 4;
+  boolType.fieldSize = boolType.fieldAlign = 1;
+  intType.hasRefCount = boolType.hasRefCount = false;
+
   // Add fields next
   for (const [typeID, ctors] of list) {
-    const data = context.types[typeID.index];
+    const type = context.types[typeID.index];
+    let ctorOffsetStart = 0;
+
+    // If present, the reference count comes first
+    if (type.hasRefCount) {
+      ctorOffsetStart += 4;
+    }
+
+    // If present, the tag comes next
+    if (ctors.length > 1) {
+      type.tagOffset = ctorOffsetStart;
+      ctorOffsetStart += 4;
+    }
 
     // Resolve field types now that all types have been defined
     for (let j = 0; j < ctors.length; j++) {
       const ctor = ctors[j];
-      const args = data.ctors[j].args;
+      const ctorData = type.ctors[j];
+      let ctorOffset = ctorOffsetStart;
 
       // Turn constructor arguments into fields
       for (const arg of ctor.args) {
         const typeID = resolveTypeExpr(context, arg.type);
-        args.push({typeID, name: arg.name, isKey: arg.isKey, isRef: arg.isRef});
+        const fieldType = context.types[typeID.index];
+        ctorData.args.push({typeID, name: arg.name, isKey: arg.isKey, isRef: arg.isRef});
+        ctorOffset = align(ctorOffset, fieldType.fieldAlign);
+        ctorData.fieldOffsets.push(ctorOffset);
+        ctorOffset += fieldType.fieldSize;
+      }
+
+      // The size of the type is the maximum ctor size
+      if (type.allocSize < ctorOffset) {
+        type.allocSize = ctorOffset;
       }
     }
   }
@@ -531,6 +595,31 @@ function compileArgs(context: Context, range: Range, exprs: Expr[], func: Func, 
   return results;
 }
 
+function allocType(context: Context, func: Func, type: TypeData, ctorIndex: number, args: Result[]): ValueRef {
+  const size = createConstant(func, type.allocSize).ref;
+  const ptr = addIns(func, context.currentBlock, {kind: 'MemAlloc', size});
+
+  // Initialize the reference count to 1
+  if (type.hasRefCount) {
+    addMemSet(func, context.currentBlock, ptr.ref, 0, 4, createConstant(func, 1).ref);
+  }
+
+  // Tag the allocation with the constructor that initialized it
+  if (type.tagOffset !== null) {
+    addMemSet(func, context.currentBlock, ptr.ref, type.tagOffset, 4, createConstant(func, ctorIndex).ref);
+  }
+
+  // Initialize each field
+  const ctor = type.ctors[ctorIndex];
+  for (let i = 0; i < args.length; i++) {
+    const size = context.types[ctor.args[i].typeID.index].fieldSize;
+    const arg = unwrapRef(func, context.currentBlock, args[i].value);
+    addMemSet(func, context.currentBlock, ptr.ref, ctor.fieldOffsets[i], size, arg);
+  }
+
+  return ptr;
+}
+
 function compileExpr(context: Context, expr: Expr, func: Func, scope: Scope, castTo: TypeID | null): Result {
   let result = errorResult(context, func);
 
@@ -571,12 +660,12 @@ function compileExpr(context: Context, expr: Expr, func: Func, scope: Scope, cas
       if (global !== undefined) {
         global = forwardToDefaultCtor(context, global);
         if (global.kind === 'Ctor') {
-          const ctor = context.types[global.typeID.index].ctors[global.index];
+          const type = context.types[global.typeID.index];
+          const ctor = type.ctors[global.index];
           const args = compileArgs(context, expr.range, [], func, scope, ctor.args);
-          appendToLog(context.log, expr.range, `Constructors are not currently implemented`);
           result = {
             typeID: global.typeID,
-            value: createConstant(func, 0),
+            value: allocType(context, func, type, global.index, args),
           };
         } else {
           appendToLog(context.log, expr.range, `Cannot use the name "${name}" as a value`);
@@ -699,12 +788,12 @@ function compileExpr(context: Context, expr: Expr, func: Func, scope: Scope, cas
       // Check for a constructor
       global = forwardToDefaultCtor(context, global);
       if (global.kind === 'Ctor') {
-        const ctor = context.types[global.typeID.index].ctors[global.index];
+        const type = context.types[global.typeID.index];
+        const ctor = type.ctors[global.index];
         const args = compileArgs(context, expr.range, expr.kind.args, func, scope, ctor.args);
-        appendToLog(context.log, expr.range, `Constructors are not currently implemented`);
         result = {
           typeID: global.typeID,
-          value: createConstant(func, 0),
+          value: allocType(context, func, type, global.index, args),
         };
       }
 
@@ -737,13 +826,16 @@ function compileExpr(context: Context, expr: Expr, func: Func, scope: Scope, cas
         if (type.ctors.length !== 1) {
           appendToLog(context.log, expr.kind.nameRange, `Cannot access the field "${name}" because the type "${type.name}" has multiple constructors`);
         } else {
+          const ctorData = type.ctors[0];
           let found = false;
-          for (const arg of type.ctors[0].args) {
+          for (let i = 0; i < ctorData.args.length; i++) {
+            const arg = ctorData.args[i];
             if (arg.name === name) {
               found = true;
               result = {
                 typeID: arg.typeID,
-                value: createConstant(func, 0),
+                value: addMemGet(func, context.currentBlock, unwrapRef(func, context.currentBlock, target.value),
+                  ctorData.fieldOffsets[i], context.types[arg.typeID.index].fieldSize),
               };
               break;
             }
@@ -974,8 +1066,8 @@ export function compile(log: Log, parsed: Parsed, ptrType: RawType): Code {
     stringTypeID: {index: 0},
   };
 
-  context.errorTypeID = addTypeID(context, {source: -1, start: 0, end: 0}, '(error)');
-  context.voidTypeID = addTypeID(context, {source: -1, start: 0, end: 0}, '(void)');
+  context.errorTypeID = addTypeID(context, {source: -1, start: 0, end: 0}, '(error)', 0);
+  context.voidTypeID = addTypeID(context, {source: -1, start: 0, end: 0}, '(void)', 0);
   compileTypes(context, parsed);
   compileDefs(context, parsed);
   return context.code;

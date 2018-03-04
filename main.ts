@@ -36,6 +36,7 @@ export async function main(): Promise<void> {
     console.log('5702887');
     const end = Date.now();
     console.log('time:', ((end - start) / 1000).toFixed(3) + 's');
+    console.log(instance.exports.main());
   } else {
     console.log('done');
   }

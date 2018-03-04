@@ -422,15 +422,41 @@ function encodeIns(func: Func, args: InsRef[], opArgs: OpArg[], ins: Ins): void 
       throw new Error('Not yet implemented');
 
     case 'MemAlloc':
+      // TODO
+      opArgs.push({op: Opcode.I32Const, arg: 0});
+      opArgs.push({op: Opcode.Drop, arg: null});
+      opArgs.push({op: Opcode.GrowMemory, arg: 0});
+      opArgs.push({op: Opcode.I32Const, arg: 1});
+      opArgs.push({op: Opcode.Drop, arg: null});
+      args.push(ins.size);
+      break;
+
     case 'MemFree':
-    case 'MemCopy':
-      throw new Error('Not yet implemented');
+      // TODO
+      opArgs.push({op: Opcode.Drop, arg: null});
+      opArgs.push({op: Opcode.Drop, arg: null});
+      args.push(ins.ptr, ins.size);
+      break;
 
     case 'MemGet8':
+      opArgs.push({op: Opcode.I32Load8U, arg: ins.offset});
+      args.push(ins.ptr);
+      break;
+
     case 'MemSet8':
+      opArgs.push({op: Opcode.I32Store8, arg: ins.offset});
+      args.push(ins.ptr, ins.value);
+      break;
+
     case 'MemGet32':
+      opArgs.push({op: Opcode.I32Load, arg: ins.offset});
+      args.push(ins.ptr);
+      break;
+
     case 'MemSet32':
-      throw new Error('Not yet implemented');
+      opArgs.push({op: Opcode.I32Store, arg: ins.offset});
+      args.push(ins.ptr, ins.value);
+      break;
 
     case 'Call':
       opArgs.push({op: Opcode.Call, arg: ins.index});
@@ -924,6 +950,45 @@ function encodeFunc(func: Func, bb: ByteBuffer): void {
         case Opcode.Loop:
         case Opcode.Block:
           bb.writeVarS(opArg.arg);
+          console.log(`  ${Opcode[opArg.op]} ${opArg.arg}`);
+          break;
+
+        case Opcode.I32Load8S:
+        case Opcode.I32Load8U:
+        case Opcode.I64Load8S:
+        case Opcode.I64Load8U:
+        case Opcode.I32Store8:
+        case Opcode.I64Store8:
+          bb.writeVarU(0); // Align to 1 byte
+          bb.writeVarU(opArg.arg);
+          console.log(`  ${Opcode[opArg.op]} ${opArg.arg}`);
+          break;
+
+        case Opcode.I32Load16S:
+        case Opcode.I32Load16U:
+        case Opcode.I64Load16S:
+        case Opcode.I64Load16U:
+        case Opcode.I32Store16:
+        case Opcode.I64Store16:
+          bb.writeVarU(1); // Align to 2 bytes
+          bb.writeVarU(opArg.arg);
+          console.log(`  ${Opcode[opArg.op]} ${opArg.arg}`);
+          break;
+
+        case Opcode.I32Load:
+        case Opcode.I64Load32S:
+        case Opcode.I64Load32U:
+        case Opcode.I32Store:
+        case Opcode.I64Store32:
+          bb.writeVarU(2); // Align to 4 bytes
+          bb.writeVarU(opArg.arg);
+          console.log(`  ${Opcode[opArg.op]} ${opArg.arg}`);
+          break;
+
+        case Opcode.I64Load:
+        case Opcode.I64Store:
+          bb.writeVarU(3); // Align to 8 bytes
+          bb.writeVarU(opArg.arg);
           console.log(`  ${Opcode[opArg.op]} ${opArg.arg}`);
           break;
 

@@ -20,7 +20,6 @@ export type Ins =
 
   {kind: 'MemAlloc', size: InsRef} |
   {kind: 'MemFree', ptr: InsRef, size: InsRef} |
-  {kind: 'MemCopy', from: InsRef, to: InsRef, size: number, align: number} |
 
   {kind: 'MemGet8', ptr: InsRef, offset: number} |
   {kind: 'MemSet8', ptr: InsRef, offset: number, value: InsRef} |
@@ -208,6 +207,22 @@ export function addIns(func: Func, block: number, ins: Ins): ValueRef {
   return {block, ref: {index}};
 }
 
+export function addMemGet(func: Func, block: number, ptr: InsRef, offset: number, size: number): ValueRef {
+  switch (size) {
+    case 1: return addIns(func, block, {kind: 'MemGet8', ptr, offset});
+    case 4: return addIns(func, block, {kind: 'MemGet32', ptr, offset});
+    default: throw new Error('Internal error');
+  }
+}
+
+export function addMemSet(func: Func, block: number, ptr: InsRef, offset: number, size: number, value: InsRef): void {
+  switch (size) {
+    case 1: addIns(func, block, {kind: 'MemSet8', ptr, offset, value}); break;
+    case 4: addIns(func, block, {kind: 'MemSet32', ptr, offset, value}); break;
+    default: throw new Error('Internal error');
+  }
+}
+
 export function addLocalGet(func: Func, block: number, local: number): ValueRef {
   const target = func.blocks[block];
   let ref = target.previousLocals.get(local);
@@ -233,7 +248,6 @@ export function argsOf(ins: Ins): InsRef[] {
 
     case 'MemAlloc': return [ins.size];
     case 'MemFree': return [ins.ptr, ins.size];
-    case 'MemCopy': return [ins.from, ins.to];
 
     case 'MemGet8': return [ins.ptr];
     case 'MemSet8': return [ins.ptr, ins.value];
@@ -335,15 +349,28 @@ function blockToString(context: ToStringContext, block: BasicBlock, indent: stri
         throw new Error('Not yet implemented');
 
       case 'MemAlloc':
+        text += `${indent}t${i} = mem.alloc ${refToString(context.func, ins.size)}\n`;
+        break;
+
       case 'MemFree':
-      case 'MemCopy':
-        throw new Error('Not yet implemented');
+        text += `${indent}t${i} = mem.free ${refToString(context.func, ins.ptr)}, ${refToString(context.func, ins.size)}\n`;
+        break;
 
       case 'MemGet8':
+        text += `${indent}t${i} = mem.get8 ${refToString(context.func, ins.ptr)}, ${ins.offset}\n`;
+        break;
+
       case 'MemSet8':
+        text += `${indent}t${i} = mem.set8 ${refToString(context.func, ins.ptr)}, ${ins.offset}, ${refToString(context.func, ins.value)}\n`;
+        break;
+
       case 'MemGet32':
+        text += `${indent}t${i} = mem.get32 ${refToString(context.func, ins.ptr)}, ${ins.offset}\n`;
+        break;
+
       case 'MemSet32':
-        throw new Error('Not yet implemented');
+        text += `${indent}t${i} = mem.set32 ${refToString(context.func, ins.ptr)}, ${ins.offset}, ${refToString(context.func, ins.value)}\n`;
+        break;
 
       case 'LocalGet':
         text += `${indent}t${i} = v${ins.local}\n`;
@@ -513,7 +540,6 @@ export function typeOf(func: Func, block: number, ref: InsRef): RawType {
       return func.locals[ins.local];
 
     case 'MemFree':
-    case 'MemCopy':
     case 'MemSet8':
     case 'MemSet32':
     case 'LocalSet':
