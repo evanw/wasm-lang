@@ -221,34 +221,37 @@ function compileTypes(context: Context, parsed: Parsed): void {
 
   // Add type names first
   for (const decl of parsed.types) {
-    if (decl.params.length === 0) {
-      const typeID = addTypeID(context, decl.nameRange, decl.name, ptrBytes);
-      if (typeID === context.errorTypeID) {
-        continue;
-      }
-      const data = context.types[typeID.index];
-      const ctors: CtorDecl[] = [];
-
-      // Also add constructors
-      for (const ctor of decl.ctors) {
-        const index = data.ctors.length;
-
-        // Allow one constructor to share the name of the type
-        if (ctor.name === decl.name && data.defaultCtor === null) {
-          data.defaultCtor = data.ctors.length;
-          data.ctors.push({name: ctor.name, args: [], fieldOffsets: []});
-          ctors.push(ctor);
-        }
-
-        // Otherwise the constructor must have a unique global name
-        else if (defineGlobal(context, ctor.nameRange, ctor.name, {kind: 'Ctor', typeID, index})) {
-          data.ctors.push({name: ctor.name, args: [], fieldOffsets: []});
-          ctors.push(ctor);
-        }
-      }
-
-      list.push([typeID, ctors]);
+    if (decl.params.length !== 0) {
+      appendToLog(context.log, decl.range, `Generic types are not currently implemented`);
+      continue;
     }
+
+    const typeID = addTypeID(context, decl.nameRange, decl.name, ptrBytes);
+    if (typeID === context.errorTypeID) {
+      continue;
+    }
+    const data = context.types[typeID.index];
+    const ctors: CtorDecl[] = [];
+
+    // Also add constructors
+    for (const ctor of decl.ctors) {
+      const index = data.ctors.length;
+
+      // Allow one constructor to share the name of the type
+      if (ctor.name === decl.name && data.defaultCtor === null) {
+        data.defaultCtor = data.ctors.length;
+        data.ctors.push({name: ctor.name, args: [], fieldOffsets: []});
+        ctors.push(ctor);
+      }
+
+      // Otherwise the constructor must have a unique global name
+      else if (defineGlobal(context, ctor.nameRange, ctor.name, {kind: 'Ctor', typeID, index})) {
+        data.ctors.push({name: ctor.name, args: [], fieldOffsets: []});
+        ctors.push(ctor);
+      }
+    }
+
+    list.push([typeID, ctors]);
   }
 
   // Bind built-in types
@@ -348,6 +351,11 @@ function compileDefs(context: Context, parsed: Parsed): void {
 
   // Resolve all argument types and return types
   for (const def of parsed.defs) {
+    if (def.params.length !== 0) {
+      appendToLog(context.log, def.range, `Generic functions are not currently implemented`);
+      continue;
+    }
+
     const args: ArgData[] = [];
     for (const arg of def.args) {
       const typeID = resolveTypeExpr(context, arg.type);
