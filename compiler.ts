@@ -866,7 +866,9 @@ function compileExpr(context: Context, expr: Expr, func: Func, scope: Scope, cas
         case BinOp.Add:
         case BinOp.Sub:
         case BinOp.Mul:
-        case BinOp.Div: {
+        case BinOp.Div:
+        case BinOp.Shl:
+        case BinOp.Shr: {
           result = compileMath32(context, func, scope, expr.kind.op, expr.kind.left, expr.kind.right);
           break;
         }
@@ -1089,6 +1091,8 @@ function compileMath32(context: Context, func: Func, scope: Scope, op: BinOp, le
     case BinOp.Sub: ins = {kind: 'Sub32', left, right}; break;
     case BinOp.Mul: ins = {kind: 'Mul32', left, right}; break;
     case BinOp.Div: ins = {kind: 'Div32S', left, right}; break;
+    case BinOp.Shl: ins = {kind: 'Shl32', left, right}; break;
+    case BinOp.Shr: ins = {kind: 'Shr32S', left, right}; break;
     default: throw new Error('Internal error');
   }
 

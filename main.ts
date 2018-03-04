@@ -29,16 +29,16 @@ def _malloc(size int) int {
   if _ptr + size > _end {
     # Lazily initialize
     if _end == 0 {
-      _end = _currentMemory() * 65536
+      _end = _currentMemory() * (1 << 16)
       _ptr = _end
     }
 
     # Ask for more pages
-    var pages = (_end - (_ptr + size) + 65535) / 65536
+    var pages = (_end - (_ptr + size) + (1 << 16) - 1) >> 16
     if _growMemory(pages) == -1 {
       _abort()
     }
-    _end = _end + pages * 65536
+    _end = _end + pages * (1 << 16)
   }
 
   # Use a bump allocator

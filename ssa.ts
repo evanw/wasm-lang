@@ -47,7 +47,10 @@ export type Ins =
   {kind: 'Sub32', left: InsRef, right: InsRef} |
   {kind: 'Mul32', left: InsRef, right: InsRef} |
   {kind: 'Div32S', left: InsRef, right: InsRef} |
-  {kind: 'Div32U', left: InsRef, right: InsRef};
+  {kind: 'Div32U', left: InsRef, right: InsRef} |
+  {kind: 'Shl32', left: InsRef, right: InsRef} |
+  {kind: 'Shr32S', left: InsRef, right: InsRef} |
+  {kind: 'Shr32U', left: InsRef, right: InsRef};
 
 // Unlike in other compilers, BasicBlocks form a tree instead of a block soup.
 // This makes it possible to emit the structured output that WebAssembly
@@ -281,6 +284,9 @@ export function argsOf(ins: Ins): InsRef[] {
     case 'Mul32': return [ins.left, ins.right];
     case 'Div32S': return [ins.left, ins.right];
     case 'Div32U': return [ins.left, ins.right];
+    case 'Shl32': return [ins.left, ins.right];
+    case 'Shr32S': return [ins.left, ins.right];
+    case 'Shr32U': return [ins.left, ins.right];
 
     default: {
       const checkCovered: void = ins;
@@ -419,6 +425,9 @@ function blockToString(context: ToStringContext, block: BasicBlock, indent: stri
       case 'Mul32': text += binaryToString(context, i, 'i32.mul', indent, ins.left, ins.right); break;
       case 'Div32S': text += binaryToString(context, i, 'i32.div_s', indent, ins.left, ins.right); break;
       case 'Div32U': text += binaryToString(context, i, 'i32.div_u', indent, ins.left, ins.right); break;
+      case 'Shl32': text += binaryToString(context, i, 'i32.shl', indent, ins.left, ins.right); break;
+      case 'Shr32S': text += binaryToString(context, i, 'i32.shr_s', indent, ins.left, ins.right); break;
+      case 'Shr32U': text += binaryToString(context, i, 'i32.shr_u', indent, ins.left, ins.right); break;
 
       default: {
         const checkCovered: void = ins;
@@ -595,6 +604,9 @@ export function typeOf(func: Func, block: number, ref: InsRef): RawType {
     case 'And32':
     case 'Or32':
     case 'Xor32':
+    case 'Shl32':
+    case 'Shr32S':
+    case 'Shr32U':
       return RawType.I32;
 
     default: {

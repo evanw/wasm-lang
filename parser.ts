@@ -106,6 +106,8 @@ export enum BinOp {
   BitAnd,
   BitOr,
   BitXor,
+  Shl,
+  Shr,
 }
 
 export type ExprKind =
@@ -338,9 +340,10 @@ const LEVEL_BIT_XOR = 4;
 const LEVEL_BIT_AND = 5;
 const LEVEL_EQUALITY = 6;
 const LEVEL_COMPARE = 7;
-const LEVEL_ADD = 8;
-const LEVEL_MULTIPLY = 9;
-const LEVEL_PREFIX = 10;
+const LEVEL_SHIFT = 8;
+const LEVEL_ADD = 9;
+const LEVEL_MULTIPLY = 10;
+const LEVEL_PREFIX = 11;
 
 function parseBinary(lexer: Lexer, left: Expr, op: BinOp, level: number): Expr | null {
   advance(lexer);
@@ -444,6 +447,18 @@ function parseExpr(lexer: Lexer, level: number): Expr | null {
       case Token.Caret: {
         if (level >= LEVEL_BIT_XOR) return left;
         left = parseBinary(lexer, left, BinOp.BitXor, LEVEL_BIT_XOR);
+        break;
+      }
+
+      case Token.LessThanLessThan: {
+        if (level >= LEVEL_SHIFT) return left;
+        left = parseBinary(lexer, left, BinOp.Shl, LEVEL_SHIFT);
+        break;
+      }
+
+      case Token.GreaterThanGreaterThan: {
+        if (level >= LEVEL_SHIFT) return left;
+        left = parseBinary(lexer, left, BinOp.Shr, LEVEL_SHIFT);
         break;
       }
 

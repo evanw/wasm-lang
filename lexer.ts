@@ -33,8 +33,10 @@ export enum Token {
   ExclamationMarkEquals,
   GreaterThan,
   GreaterThanEquals,
+  GreaterThanGreaterThan,
   LessThan,
   LessThanEquals,
+  LessThanLessThan,
   Minus,
   OpenBrace,
   OpenBracket,
@@ -154,15 +156,21 @@ export function advance(lexer: Lexer): void {
         if (lexer.end < limit && lexer.text[lexer.end] === '=') {
           lexer.end++;
           lexer.token = Token.LessThanEquals;
+        } else if (lexer.end < limit && lexer.text[lexer.end] === '<') {
+          lexer.end++;
+          lexer.token = Token.LessThanLessThan;
         } else {
           lexer.token = Token.LessThan;
         }
         break;
 
-        case '>':
+      case '>':
         if (lexer.end < limit && lexer.text[lexer.end] === '=') {
           lexer.end++;
           lexer.token = Token.GreaterThanEquals;
+        } else if (lexer.end < limit && lexer.text[lexer.end] === '>') {
+          lexer.end++;
+          lexer.token = Token.GreaterThanGreaterThan;
         } else {
           lexer.token = Token.GreaterThan;
         }

@@ -590,6 +590,9 @@ function encodeIns(context: BlockContext, args: InsRef[], ins: Ins): void {
     case 'Mul32': encodeBinaryIns(args, opArgs, Opcode.I32Mul, ins.left, ins.right); break;
     case 'Div32S': encodeBinaryIns(args, opArgs, Opcode.I32DivS, ins.left, ins.right); break;
     case 'Div32U': encodeBinaryIns(args, opArgs, Opcode.I32DivU, ins.left, ins.right); break;
+    case 'Shl32': encodeBinaryIns(args, opArgs, Opcode.I32Shl, ins.left, ins.right); break;
+    case 'Shr32S': encodeBinaryIns(args, opArgs, Opcode.I32ShrS, ins.left, ins.right); break;
+    case 'Shr32U': encodeBinaryIns(args, opArgs, Opcode.I32ShrU, ins.left, ins.right); break;
 
     case 'Lt32S': encodeCompareIns(args, opArgs, ins.left, ins.right, Opcode.I32LtS, Opcode.I32GtS); break;
     case 'Lt32U': encodeCompareIns(args, opArgs, ins.left, ins.right, Opcode.I32LtU, Opcode.I32GtU); break;
