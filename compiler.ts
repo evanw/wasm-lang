@@ -23,7 +23,7 @@ import {
   addMemGet,
   addMemSet,
 } from './ssa';
-import { assert } from './util';
+import { assert, align } from './util';
 
 interface TypeID {
   index: number;
@@ -75,12 +75,21 @@ type GlobalRef =
   {kind: 'Def', defID: number} |
   {kind: 'Var', varID: number};
 
+interface VarData {
+  name: string;
+  typeID: TypeID;
+
+  // The index of the entry in the "globals" table of the "Code" object
+  index: number;
+}
+
 interface Context {
   code: Code;
   log: Log;
   ptrType: RawType;
   types: TypeData[];
   defs: DefData[];
+  vars: VarData[];
   globalScope: Map<string, GlobalRef>;
 
   // Function-specific temporaries
@@ -161,12 +170,6 @@ function resolveTypeName(context: Context, range: Range, name: string): TypeID {
   }
 
   return ref.typeID;
-}
-
-function align(value: number, align: number): number {
-  assert((align & (align - 1)) === 0); // Alignment must be a power of 2
-  value = (value + align - 1) & ~(align - 1);
-  return value;
 }
 
 function compileTypes(context: Context, parsed: Parsed): void {
@@ -492,15 +495,33 @@ function compileStmts(context: Context, stmts: Stmt[], func: Func, parent: Scope
           appendToLog(context.log, target.range, `Invalid assignment target`);
           break;
         }
+        const name = target.kind.value;
 
-        const local = findLocal(scope, target.kind.value);
-        if (local === null) {
-          appendToLog(context.log, target.range, `There is no local variable named "${name}" here`);
+        // Check for a local first
+        const local = findLocal(scope, name);
+        if (local !== null) {
+          const result = compileExpr(context, stmt.kind.value, func, scope, local.typeID);
+          addLocalSet(func, context.currentBlock, local.index, result.value);
           break;
         }
 
-        const result = compileExpr(context, stmt.kind.value, func, scope, local.typeID);
-        addLocalSet(func, context.currentBlock, local.index, result.value);
+        // Check for a global next
+        const global = context.globalScope.get(name);
+        if (global !== undefined) {
+          if (global.kind === 'Var') {
+            const data = context.vars[global.varID];
+            const ptr = addIns(func, context.currentBlock, {kind: 'PtrGlobal', index: data.index});
+            const size = context.types[data.typeID.index].fieldSize;
+            const result = compileExpr(context, stmt.kind.value, func, scope, data.typeID);
+            addMemSet(func, context.currentBlock, ptr.ref, 0, size,
+              unwrapRef(func, context.currentBlock, result.value));
+          } else {
+            appendToLog(context.log, target.range, `Cannot use the name "${name}" as a value`);
+          }
+          break;
+        }
+
+        appendToLog(context.log, target.range, `There is no variable named "${name}" here`);
         break;
       }
 
@@ -666,6 +687,14 @@ function compileExpr(context: Context, expr: Expr, func: Func, scope: Scope, cas
           result = {
             typeID: global.typeID,
             value: allocType(context, func, type, global.index, args),
+          };
+        } else if (global.kind === 'Var') {
+          const data = context.vars[global.varID];
+          const ptr = addIns(func, context.currentBlock, {kind: 'PtrGlobal', index: data.index});
+          const size = context.types[data.typeID.index].fieldSize;
+          result = {
+            typeID: data.typeID,
+            value: addMemGet(func, context.currentBlock, ptr.ref, 0, size),
           };
         } else {
           appendToLog(context.log, expr.range, `Cannot use the name "${name}" as a value`);
@@ -1045,6 +1074,41 @@ function defineLocal(context: Context, func: Func, scope: Scope, name: string, r
   return index;
 }
 
+function compileVars(context: Context, parsed: Parsed): void {
+  for (const decl of parsed.vars) {
+    if (defineGlobal(context, decl.nameRange, decl.name, {kind: 'Var', varID: context.vars.length})) {
+      let typeID = context.errorTypeID;
+      let bytes = new Uint8Array(4);
+
+      if (decl.type.kind.kind === 'Inferred') {
+        typeID = context.intTypeID;
+      } else {
+        typeID = resolveTypeExpr(context, decl.type);
+
+        // Only allow "int" for now
+        if (typeID !== context.errorTypeID && typeID !== context.intTypeID) {
+          const expected = context.types[context.intTypeID.index].name;
+          const found = context.types[typeID.index].name;
+          appendToLog(context.log, decl.type.range, `Expected type "${expected}" but found type "${found}"`);
+          typeID = context.errorTypeID;
+        }
+      }
+
+      // Restrict global variable initializers for now
+      if (decl.value.kind.kind === 'Int') {
+        new Int32Array(bytes.buffer)[0] = decl.value.kind.value;;
+      } else {
+        appendToLog(context.log, decl.value.range, `Invalid global variable initializer`);
+        typeID = context.errorTypeID;
+      }
+
+      const index = context.code.globals.length;
+      context.code.globals.push({name: decl.name, bytes});
+      context.vars.push({name: decl.name, typeID, index});
+    }
+  }
+}
+
 export function compile(log: Log, parsed: Parsed, ptrType: RawType): Code {
   const context: Context = {
     code: {funcs: [], globals: []},
@@ -1052,6 +1116,7 @@ export function compile(log: Log, parsed: Parsed, ptrType: RawType): Code {
     ptrType,
     types: [],
     defs: [],
+    vars: [],
     globalScope: new Map(),
 
     // Function-specific temporaries
@@ -1069,6 +1134,7 @@ export function compile(log: Log, parsed: Parsed, ptrType: RawType): Code {
   context.errorTypeID = addTypeID(context, {source: -1, start: 0, end: 0}, '(error)', 0);
   context.voidTypeID = addTypeID(context, {source: -1, start: 0, end: 0}, '(void)', 0);
   compileTypes(context, parsed);
+  compileVars(context, parsed);
   compileDefs(context, parsed);
   return context.code;
 }

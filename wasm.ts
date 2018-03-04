@@ -12,6 +12,7 @@ import {
   RawType,
   typeOf,
 } from './ssa';
+import { align } from './util';
 
 declare const Buffer: any;
 
@@ -340,9 +341,29 @@ function gatherTypes(code: Code): {funcTypes: FuncType[], funcIndices: number[]}
   return {funcIndices, funcTypes};
 }
 
+export function allocateGlobals(code: Code): {initializer: Uint8Array, globalOffsets: number[]} {
+  const bb = new ByteBuffer;
+  const globalOffsets: number[] = [];
+  let offset = 1; // Reserve the byte at 0 for null pointers
+
+  for (const global of code.globals) {
+    offset = align(offset, 8);
+    globalOffsets.push(offset);
+    while (bb.length < offset) {
+      bb.writeByte(0);
+    }
+    bb.writeBytes(global.bytes);
+    offset += global.bytes.length;
+  }
+
+  return {globalOffsets, initializer: bb.finish()};
+}
+
 export function encodeWASM(code: Code): Uint8Array {
   const {funcTypes, funcIndices} = gatherTypes(code);
+  const {initializer, globalOffsets} = allocateGlobals(code);
 
+  // Write the WebAssembly header
   const bb = new ByteBuffer;
   bb.writeBytes([0, 0x61, 0x73, 0x6D, 1, 0, 0, 0]);
 
@@ -374,9 +395,10 @@ export function encodeWASM(code: Code): Uint8Array {
 
   // Write the "memory" section
   const memoryBB = new ByteBuffer;
+  const initialPageCount = align(initializer.length, 1 << 16) >> 16;
   memoryBB.writeVarU(1); // 1 memory
   memoryBB.writeVarU(0); // No maximum
-  memoryBB.writeVarU(0); // Initial page count (64kb each)
+  memoryBB.writeVarU(initialPageCount); // Initial page count (64kb each)
   bb.writeSection(Section.Memory, memoryBB);
 
   // Write the "globals" section
@@ -401,11 +423,22 @@ export function encodeWASM(code: Code): Uint8Array {
   codeBB.writeVarU(code.funcs.length);
   for (const func of code.funcs) {
     const bodyBB = new ByteBuffer;
-    encodeFunc(func, bodyBB);
+    encodeFunc(func, globalOffsets, bodyBB);
     codeBB.writeVarU(bodyBB.length);
     codeBB.writeBytes(bodyBB.finish());
   }
   bb.writeSection(Section.Code, codeBB);
+
+  // Write the "data" section
+  const dataBB = new ByteBuffer;
+  dataBB.writeVarU(1);
+  dataBB.writeVarU(0);
+  dataBB.writeByte(Opcode.I32Const);
+  dataBB.writeVarS(0);
+  dataBB.writeByte(Opcode.End);
+  dataBB.writeVarU(initializer.length);
+  dataBB.writeBytes(initializer);
+  bb.writeSection(Section.Data, dataBB);
 
   return bb.finish();
 }
@@ -415,9 +448,12 @@ interface OpArg {
   arg: number | null;
 }
 
-function encodeIns(func: Func, args: InsRef[], opArgs: OpArg[], ins: Ins): void {
+function encodeIns(func: Func, globalOffsets: number[], args: InsRef[], opArgs: OpArg[], ins: Ins): void {
   switch (ins.kind) {
     case 'PtrGlobal':
+      opArgs.push({op: Opcode.I32Const, arg: globalOffsets[ins.index]});
+      break;
+
     case 'PtrStack':
       throw new Error('Not yet implemented');
 
@@ -639,6 +675,7 @@ function finishLocals(locals: Locals, bb: ByteBuffer): number[] {
 
 interface BlockContext {
   func: Func;
+  globalOffsets: number[];
   locals: Locals;
   uses: number[];
   opArgs: OpArg[];
@@ -649,7 +686,7 @@ interface BlockContext {
 function visitIns(context: BlockContext): void {
   const block = context.func.blocks[context.blockIndex];
   const args: InsRef[] = [];
-  encodeIns(context.func, args, context.opArgs, block.insList[context.insIndex]);
+  encodeIns(context.func, context.globalOffsets, args, context.opArgs, block.insList[context.insIndex]);
 
   // Encode the args in reverse because we're encoding from the bottom up
   for (let i = args.length - 1; i >= 0; i--) {
@@ -740,6 +777,7 @@ interface LabelStackEntry {
 
 function encodeBlockTree(
   func: Func,
+  globalOffsets: number[],
   locals: Locals,
   metas: BlockMeta[],
   stack: LabelStackEntry[],
@@ -750,6 +788,7 @@ function encodeBlockTree(
   const opArgs: OpArg[] = [];
   const context: BlockContext = {
     func,
+    globalOffsets,
     locals,
     opArgs,
     uses: countUses(block),
@@ -835,12 +874,12 @@ function encodeBlockTree(
       }
 
       stream.push({op: Opcode.If, arg: Type.Empty});
-      encodeJumpTarget(func, locals, metas, stack, stream, yes);
+      encodeJumpTarget(func, globalOffsets, locals, metas, stack, stream, yes);
 
       // Only create an "else" if it's not a fallthrough
       if (no.kind !== 'Next' || no.parent !== blockIndex) {
         stream.push({op: Opcode.Else, arg: null});
-        encodeJumpTarget(func, locals, metas, stack, stream, no);
+        encodeJumpTarget(func, globalOffsets, locals, metas, stack, stream, no);
       }
 
       stream.push({op: Opcode.End, arg: null});
@@ -855,7 +894,7 @@ function encodeBlockTree(
         stack.push({blockIndex, isLoop: false});
         stream.push({op: Opcode.Block, arg: Type.Empty});
       }
-      encodeJumpTarget(func, locals, metas, stack, stream, block.jump.target);
+      encodeJumpTarget(func, globalOffsets, locals, metas, stack, stream, block.jump.target);
       if (meta.needsLabelAfter) {
         stream.push({op: Opcode.End, arg: null});
         stack.pop();
@@ -876,12 +915,13 @@ function encodeBlockTree(
 
   // Only encode the next block if something jumps to it
   if (meta.isNextTarget && block.next !== null) {
-    encodeBlockTree(func, locals, metas, stack, stream, block.next);
+    encodeBlockTree(func, globalOffsets, locals, metas, stack, stream, block.next);
   }
 }
 
 function encodeJumpTarget(
   func: Func,
+  globalOffsets: number[],
   locals: Locals,
   metas: BlockMeta[],
   stack: LabelStackEntry[],
@@ -892,7 +932,7 @@ function encodeJumpTarget(
 
   switch (target.kind) {
     case 'Child':
-      encodeBlockTree(func, locals, metas, stack, stream, target.index);
+      encodeBlockTree(func, globalOffsets, locals, metas, stack, stream, target.index);
       return;
 
     case 'Next':
@@ -921,13 +961,13 @@ function encodeJumpTarget(
   }
 }
 
-function encodeFunc(func: Func, bb: ByteBuffer): void {
+function encodeFunc(func: Func, globalOffsets: number[], bb: ByteBuffer): void {
   // Generate the instructions
   const metas = buildBlockMetas(func);
   const locals = createLocals(func);
   const stream: OpArg[] = [];
   const stack: LabelStackEntry[] = [];
-  encodeBlockTree(func, locals, metas, stack, stream, 0);
+  encodeBlockTree(func, globalOffsets, locals, metas, stack, stream, 0);
 
   // Write the function body
   const remap = finishLocals(locals, bb);

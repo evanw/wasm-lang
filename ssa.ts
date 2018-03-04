@@ -128,11 +128,14 @@ export interface Func {
   stack: number[];
 }
 
+export interface Global {
+  name: string;
+  bytes: Uint8Array;
+}
+
 export interface Code {
   funcs: Func[];
-
-  // This stores the byte size of each global slot (used by the "PtrGlobal" instruction)
-  globals: number[];
+  globals: Global[];
 }
 
 export function createFunc(name: string, ptrType: RawType): Func {
@@ -345,8 +348,12 @@ function blockToString(context: ToStringContext, block: BasicBlock, indent: stri
       }
 
       case 'PtrGlobal':
+        text += `${indent}t${i} = ${context.code.globals[ins.index].name}\n`;
+        break;
+
       case 'PtrStack':
-        throw new Error('Not yet implemented');
+        text += `${indent}t${i} = s${ins.index}\n`;
+        break;
 
       case 'MemAlloc':
         text += `${indent}t${i} = mem.alloc ${refToString(context.func, ins.size)}\n`;
@@ -427,6 +434,10 @@ interface ToStringContext {
 export function codeToString(code: Code): string {
   let text = '';
 
+  for (const global of code.globals) {
+    text += `${global.name} = ${Array.from(global.bytes).join(' ')}\n`;
+  }
+
   for (const func of code.funcs) {
     const context: ToStringContext = {
       code,
@@ -437,6 +448,9 @@ export function codeToString(code: Code): string {
     text += `def ${func.name}(${args}) ${RawType[func.retType]}\n`;
     for (let i = 0; i < func.locals.length; i++) {
       text += `  v${i} ${RawType[func.locals[i]]}\n`;
+    }
+    for (let i = 0; i < func.stack.length; i++) {
+      text += `  s${i} ${func.stack[i]}\n`;
     }
     text += blockTreeToString(context, 0, '  ');
   }
