@@ -14,6 +14,7 @@ export enum RawType {
 
 export type Ins =
   {kind: 'Call', index: number, args: InsRef[], retType: RawType} |
+  {kind: 'CallImport', index: number, args: InsRef[], retType: RawType} |
   {kind: 'CallIntrinsic', name: string, args: InsRef[], retType: RawType} |
 
   {kind: 'PtrGlobal', index: number} |
@@ -137,11 +138,28 @@ export interface Global {
   bytes: Uint8Array;
 }
 
+export interface Import {
+  name: string;
+  argTypes: RawType[];
+  retType: RawType;
+}
+
 export interface Code {
   funcs: Func[];
   globals: Global[];
+  imports: Import[];
   mallocIndex: number | null;
   freeIndex: number | null;
+}
+
+export function createCode(): Code {
+  return {
+    funcs: [],
+    globals: [],
+    imports: [],
+    mallocIndex: null,
+    freeIndex: null,
+  };
 }
 
 export function createFunc(name: string, ptrType: RawType): Func {
@@ -252,6 +270,7 @@ export function addLocalSet(func: Func, block: number, local: number, value: Val
 export function argsOf(ins: Ins): InsRef[] {
   switch (ins.kind) {
     case 'Call': return ins.args;
+    case 'CallImport': return ins.args;
     case 'CallIntrinsic': return ins.args;
 
     case 'PtrGlobal': return [];
@@ -355,6 +374,12 @@ function blockToString(context: ToStringContext, block: BasicBlock, indent: stri
           args.push(refToString(context.func, arg));
         }
         text += `${indent}t${i} = call ${args.join(', ')}\n`;
+        break;
+      }
+
+      case 'CallImport': {
+        const args = ins.args.map(arg => refToString(context.func, arg));
+        text += `${indent}t${i} = ${context.code.imports[ins.index]} ${args.join(', ')}\n`;
         break;
       }
 
@@ -587,6 +612,7 @@ export function typeOf(func: Func, block: number, ref: InsRef): RawType {
       return func.ptrType;
 
     case 'Call':
+    case 'CallImport':
     case 'CallIntrinsic':
       return ins.retType;
 

@@ -22,6 +22,7 @@ import {
   ValueRef,
   addMemGet,
   addMemSet,
+  createCode,
 } from './ssa';
 import { assert, align } from './util';
 
@@ -65,6 +66,7 @@ interface TypeData {
 
 type DefKind =
   {kind: 'Func', index: number} |
+  {kind: 'Import', index: number} |
   {kind: 'Intrinsic', name: string};
 
 interface DefData {
@@ -311,20 +313,33 @@ interface Scope {
   locals: Map<string, Local>;
 }
 
-function findTag(context: Context, def: DefDecl, name: string): Tag | null {
-  let found: Tag | null = null;
+function getFirstTag(context: Context, tags: Tag[]): Tag | null {
+  if (tags.length === 0) {
+    return null;
+  }
 
-  for (const tag of def.tags) {
-    if (tag.name === name) {
-      if (found === null) {
-        found = tag;
-      } else {
-        appendToLog(context.log, tag.range, `Duplicate tag "${name}"`);
-      }
+  if (tags.length > 1) {
+    for (let i = 1; i < tags.length; i++) {
+      appendToLog(context.log, tags[i].range, `Ignoring extra tag "${tags[i].name}"`);
     }
   }
 
-  return found;
+  return tags[0];
+}
+
+function getStringArg(context: Context, tag: Tag): string | null {
+  if (tag.args.length !== 1) {
+    appendToLog(context.log, tag.range, `The "@intrinsic" tag takes one argument`);
+    return null;
+  }
+
+  const arg = tag.args[0];
+  if (arg.kind.kind !== 'String') {
+    appendToLog(context.log, arg.range, `The "@intrinsic" argument must be a string`);
+    return null;
+  }
+
+  return arg.kind.value;
 }
 
 function compileDefs(context: Context, parsed: Parsed): void {
@@ -338,31 +353,40 @@ function compileDefs(context: Context, parsed: Parsed): void {
       args.push({typeID, name: arg.name, isKey: arg.isKey, isRef: arg.isRef});
     }
     const retTypeID = resolveTypeExpr(context, def.ret);
-    const intrinsicTag = findTag(context, def, "intrinsic");
+    const tag = getFirstTag(context, def.tags);
     let intrinsicName: string | null = null;
+    let importName: string | null = null;
     let kind: DefKind;
 
     // Try to resolve the intrinsic name
-    if (intrinsicTag !== null) {
-      if (intrinsicTag.args.length !== 1) {
-        appendToLog(context.log, intrinsicTag.range, `The "@intrinsic" tag takes one argument`);
+    if (tag !== null) {
+      if (tag.name === "intrinsic") {
+        intrinsicName = getStringArg(context, tag);
+      } else if (tag.name === "import") {
+        importName = getStringArg(context, tag);
       } else {
-        const name = intrinsicTag.args[0];
-        if (name.kind.kind !== 'String') {
-          appendToLog(context.log, name.range, `The "@intrinsic" argument must be a string`);
-        } else {
-          intrinsicName = name.kind.value;
-        }
+        appendToLog(context.log, tag.range, `Use of unknown tag "${tag.name}"`);
       }
     }
 
     // Intrinsic functions should not have a body
     if (intrinsicName !== null) {
-      let name = '(error)';
       if (def.body !== null) {
         appendToLog(context.log, def.nameRange, `Intrinsic functions cannot be implemented`);
       }
       kind = {kind: 'Intrinsic', name: intrinsicName};
+    }
+
+    // Imported functions should also not have a body
+    else if (importName !== null) {
+      if (def.body !== null) {
+        appendToLog(context.log, def.nameRange, `Imported functions cannot be implemented`);
+      }
+      const index = context.code.imports.length;
+      const argTypes = args.map(arg => rawTypeForTypeID(context, arg.typeID));
+      const retType = rawTypeForTypeID(context, retTypeID);
+      context.code.imports.push({name: importName, argTypes, retType});
+      kind = {kind: 'Import', index};
     }
 
     // Regular functions should have a body
@@ -371,7 +395,7 @@ function compileDefs(context: Context, parsed: Parsed): void {
       const index = context.code.funcs.length;
       kind = {kind: 'Func', index};
       context.code.funcs.push(func);
-      if (def.body === null && intrinsicTag === null) {
+      if (def.body === null) {
         appendToLog(context.log, def.nameRange, `Must implement "${def.name}"`);
       }
 
@@ -955,6 +979,13 @@ function compileExpr(context: Context, expr: Expr, func: Func, scope: Scope, cas
             };
             break;
 
+          case 'Import':
+            result = {
+              typeID: def.retTypeID,
+              value: addIns(func, context.currentBlock, {kind: 'CallImport', index: def.kind.index, args, retType}),
+            };
+            break;
+
           case 'Intrinsic':
             result = {
               typeID: def.retTypeID,
@@ -1241,13 +1272,7 @@ function compileVars(context: Context, parsed: Parsed): void {
 
 export function compile(log: Log, parsed: Parsed, ptrType: RawType): Code {
   const context: Context = {
-    code: {
-      funcs: [],
-      globals: [],
-      mallocIndex: null,
-      freeIndex: null,
-    },
-
+    code: createCode(),
     log,
     ptrType,
     types: [],

@@ -63,14 +63,20 @@ export async function main(): Promise<void> {
     console.log(codeToString(code));
     const wasm = encodeWASM(code);
     require('fs').writeFileSync('example.wasm', wasm);
-    const {instance} = await WebAssembly.instantiate(wasm);
+
+    const {instance} = await WebAssembly.instantiate(wasm, {imports: {
+      add: (a: number, b: number) => a + b,
+    }});
     console.log(instance);
+
     const start = Date.now();
     console.log(instance.exports.fib(34));
     console.log('5702887');
     const end = Date.now();
     console.log('time:', ((end - start) / 1000).toFixed(3) + 's');
+
     console.log(instance.exports.main());
+    console.log(instance.exports.add(1, 2));
   } else {
     console.log('done');
   }

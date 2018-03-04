@@ -315,31 +315,60 @@ function rawTypeToType(type: RawType): Type {
   }
 }
 
-function gatherTypes(code: Code): {funcTypes: FuncType[], funcIndices: number[]} {
-  const funcTypeMap = new Map<string, number>();
-  const funcIndices: number[] = [];
-  const funcTypes: FuncType[] = [];
-
-  for (const func of code.funcs) {
-    let key = RawType[func.retType];
-    for (const arg of func.argTypes) {
-      key += RawType[arg];
-    }
-
-    let index = funcTypeMap.get(key);
-    if (index === undefined) {
-      index = funcTypes.length;
-      funcTypes.push({
-        argTypes: func.argTypes.map(rawTypeToType),
-        retType: func.retType === RawType.Void ? null : rawTypeToType(func.retType),
-      });
-      funcTypeMap.set(key, index);
-    }
-
-    funcIndices.push(index);
+function addFuncType(
+  argTypes: RawType[],
+  retType: RawType,
+  typeMap: Map<string, number>,
+  types: FuncType[],
+): number {
+  let key = RawType[retType];
+  for (const arg of argTypes) {
+    key += RawType[arg];
   }
 
-  return {funcIndices, funcTypes};
+  let index = typeMap.get(key);
+  if (index === undefined) {
+    index = types.length;
+    types.push({
+      argTypes: argTypes.map(rawTypeToType),
+      retType: retType === RawType.Void ? null : rawTypeToType(retType),
+    });
+    typeMap.set(key, index);
+  }
+
+  return index;
+}
+
+interface TypeInfo {
+  typeMap: Map<string, number>;
+  types: FuncType[];
+  importTypeIndices: number[];
+  funcTypeIndices: number[];
+  funcRemap: number[];
+}
+
+function buildTypeInfo(code: Code): TypeInfo {
+  const info: TypeInfo = {
+    typeMap: new Map<string, number>(),
+    types: [],
+    importTypeIndices: [],
+    funcTypeIndices: [],
+    funcRemap: [],
+  };
+
+  for (const func of code.imports) {
+    info.importTypeIndices.push(addFuncType(
+      func.argTypes, func.retType, info.typeMap, info.types));
+  }
+
+  let count = code.imports.length;
+  for (const func of code.funcs) {
+    info.funcRemap.push(count++);
+    info.funcTypeIndices.push(addFuncType(
+      func.argTypes, func.retType, info.typeMap, info.types));
+  }
+
+  return info;
 }
 
 export function allocateGlobals(code: Code): {initializer: Uint8Array, globalOffsets: number[]} {
@@ -361,7 +390,7 @@ export function allocateGlobals(code: Code): {initializer: Uint8Array, globalOff
 }
 
 export function encodeWASM(code: Code): Uint8Array {
-  const {funcTypes, funcIndices} = gatherTypes(code);
+  const typeInfo = buildTypeInfo(code);
   const {initializer, globalOffsets} = allocateGlobals(code);
 
   // Write the WebAssembly header
@@ -370,8 +399,8 @@ export function encodeWASM(code: Code): Uint8Array {
 
   // Write the "type" section
   const typeBB = new ByteBuffer;
-  typeBB.writeVarU(funcTypes.length);
-  for (const func of funcTypes) {
+  typeBB.writeVarU(typeInfo.types.length);
+  for (const func of typeInfo.types) {
     typeBB.writeVarS(Type.Func);
     typeBB.writeVarU(func.argTypes.length);
     for (const arg of func.argTypes) {
@@ -386,10 +415,27 @@ export function encodeWASM(code: Code): Uint8Array {
   }
   bb.writeSection(Section.Type, typeBB);
 
+  // Write the "import" section
+  const importBB = new ByteBuffer;
+  importBB.writeVarU(code.imports.length);
+  for (let i = 0; i < code.imports.length; i++) {
+    const name = code.imports[i].name;
+    const dot = name.indexOf('.');
+    const moduleName = new Buffer(dot !== -1 ? name.slice(0, dot) : 'imports');
+    const fieldName = new Buffer(dot !== -1 ? name.slice(dot + 1) : name);
+    importBB.writeVarU(moduleName.length);
+    importBB.writeBytes(moduleName);
+    importBB.writeVarU(fieldName.length);
+    importBB.writeBytes(fieldName);
+    importBB.writeByte(ExternalKind.Function);
+    importBB.writeVarU(typeInfo.importTypeIndices[i]);
+  }
+  bb.writeSection(Section.Import, importBB);
+
   // Write the "function" section
   const functionBB = new ByteBuffer;
-  functionBB.writeVarU(funcIndices.length);
-  for (const index of funcIndices) {
+  functionBB.writeVarU(typeInfo.funcTypeIndices.length);
+  for (const index of typeInfo.funcTypeIndices) {
     functionBB.writeVarU(index);
   }
   bb.writeSection(Section.Function, functionBB);
@@ -421,7 +467,7 @@ export function encodeWASM(code: Code): Uint8Array {
     exportBB.writeVarU(utf8.length);
     exportBB.writeBytes(utf8);
     exportBB.writeByte(ExternalKind.Function);
-    exportBB.writeVarU(i);
+    exportBB.writeVarU(typeInfo.funcRemap[i]);
   }
   bb.writeSection(Section.Export, exportBB);
 
@@ -430,7 +476,7 @@ export function encodeWASM(code: Code): Uint8Array {
   codeBB.writeVarU(code.funcs.length);
   for (const func of code.funcs) {
     const bodyBB = new ByteBuffer;
-    encodeFunc(code, func, globalOffsets, bodyBB);
+    encodeFunc({code, func, globalOffsets, typeInfo}, bodyBB);
     codeBB.writeVarU(bodyBB.length);
     codeBB.writeBytes(bodyBB.finish());
   }
@@ -460,27 +506,31 @@ function encodeIns(context: BlockContext, args: InsRef[], ins: Ins): void {
 
   switch (ins.kind) {
     case 'PtrGlobal':
-      opArgs.push({op: Opcode.I32Const, arg: context.globalOffsets[ins.index]});
+      opArgs.push({op: Opcode.I32Const, arg: context.info.globalOffsets[ins.index]});
       break;
 
     case 'PtrStack':
       throw new Error('Not yet implemented');
 
-    case 'MemAlloc':
-      if (context.code.mallocIndex === null) {
+    case 'MemAlloc': {
+      const mallocIndex = context.info.code.mallocIndex;
+      if (mallocIndex === null) {
         throw new Error('Cannot allocate memory because "malloc" is missing');
       }
-      opArgs.push({op: Opcode.Call, arg: context.code.mallocIndex});
+      opArgs.push({op: Opcode.Call, arg: context.info.typeInfo.funcRemap[mallocIndex]});
       args.push(ins.size);
       break;
+    }
 
-    case 'MemFree':
-      if (context.code.freeIndex === null) {
+    case 'MemFree': {
+      const freeIndex = context.info.code.freeIndex;
+      if (freeIndex === null) {
         throw new Error('Cannot free memory because "free" is missing');
       }
-      opArgs.push({op: Opcode.Call, arg: context.code.freeIndex});
+      opArgs.push({op: Opcode.Call, arg: context.info.typeInfo.funcRemap[freeIndex]});
       args.push(ins.ptr, ins.size);
       break;
+    }
 
     case 'MemGet8':
       opArgs.push({op: Opcode.I32Load8U, arg: ins.offset});
@@ -503,15 +553,22 @@ function encodeIns(context: BlockContext, args: InsRef[], ins: Ins): void {
       break;
 
     case 'Call':
+      // Function calls must be remapped because their indices start after any imports
+      opArgs.push({op: Opcode.Call, arg: context.info.typeInfo.funcRemap[ins.index]});
+      args.push(...ins.args);
+      break;
+
+    case 'CallImport':
       opArgs.push({op: Opcode.Call, arg: ins.index});
       args.push(...ins.args);
       break;
 
     case 'CallIntrinsic': {
+      const func = context.info.func;
       const argTypes: RawType[] = [];
       for (const arg of ins.args) {
-        const isConstant = getConstant(context.func, arg) !== null;
-        argTypes.push(isConstant ? RawType.I32 : typeOf(context.func, context.blockIndex, arg));
+        const isConstant = getConstant(func, arg) !== null;
+        argTypes.push(isConstant ? RawType.I32 : typeOf(func, context.blockIndex, arg));
       }
 
       switch (ins.name) {
@@ -565,8 +622,8 @@ function encodeIns(context: BlockContext, args: InsRef[], ins: Ins): void {
       throw new Error('Not yet implemented');
 
     case 'Eq32': {
-      const leftConst = getConstant(context.func, ins.left);
-      const rightConst = getConstant(context.func, ins.right);
+      const leftConst = getConstant(context.info.func, ins.left);
+      const rightConst = getConstant(context.info.func, ins.right);
       if (leftConst === 0) {
         opArgs.push({op: Opcode.I32Eqz, arg: null});
         args.push(ins.right);
@@ -722,9 +779,7 @@ function finishLocals(locals: Locals, bb: ByteBuffer): number[] {
 }
 
 interface BlockContext {
-  code: Code;
-  func: Func;
-  globalOffsets: number[];
+  info: EncodeInfo;
   locals: Locals;
   uses: number[];
   opArgs: OpArg[];
@@ -733,7 +788,7 @@ interface BlockContext {
 }
 
 function visitIns(context: BlockContext): void {
-  const block = context.func.blocks[context.blockIndex];
+  const block = context.info.func.blocks[context.blockIndex];
   const args: InsRef[] = [];
   encodeIns(context, args, block.insList[context.insIndex]);
 
@@ -744,7 +799,7 @@ function visitIns(context: BlockContext): void {
 }
 
 function visitArg(context: BlockContext, arg: InsRef): void {
-  const constant = getConstant(context.func, arg);
+  const constant = getConstant(context.info.func, arg);
 
   // Is this a constant? If so, add it directly.
   if (constant !== null) {
@@ -761,7 +816,7 @@ function visitArg(context: BlockContext, arg: InsRef): void {
   // Otherwise this value will have to be generated separately,
   // saved to a local, and then loaded from a local here
   else {
-    const type = typeOf(context.func, context.blockIndex, {index: arg.index});
+    const type = typeOf(context.info.func, context.blockIndex, {index: arg.index});
     context.opArgs.push({
       op: Opcode.GetLocal,
       arg: createTemporary(context.locals, context.blockIndex, arg.index, type),
@@ -825,21 +880,17 @@ interface LabelStackEntry {
 }
 
 function encodeBlockTree(
-  code: Code,
-  func: Func,
-  globalOffsets: number[],
+  info: EncodeInfo,
   locals: Locals,
   metas: BlockMeta[],
   stack: LabelStackEntry[],
   stream: OpArg[],
   blockIndex: number,
 ): void {
-  const block = func.blocks[blockIndex];
+  const block = info.func.blocks[blockIndex];
   const opArgs: OpArg[] = [];
   const context: BlockContext = {
-    code,
-    func,
-    globalOffsets,
+    info,
     locals,
     opArgs,
     uses: countUses(block),
@@ -925,12 +976,12 @@ function encodeBlockTree(
       }
 
       stream.push({op: Opcode.If, arg: Type.Empty});
-      encodeJumpTarget(code, func, globalOffsets, locals, metas, stack, stream, yes);
+      encodeJumpTarget(info, locals, metas, stack, stream, yes);
 
       // Only create an "else" if it's not a fallthrough
       if (no.kind !== 'Next' || no.parent !== blockIndex) {
         stream.push({op: Opcode.Else, arg: null});
-        encodeJumpTarget(code, func, globalOffsets, locals, metas, stack, stream, no);
+        encodeJumpTarget(info, locals, metas, stack, stream, no);
       }
 
       stream.push({op: Opcode.End, arg: null});
@@ -945,7 +996,7 @@ function encodeBlockTree(
         stack.push({blockIndex, isLoop: false});
         stream.push({op: Opcode.Block, arg: Type.Empty});
       }
-      encodeJumpTarget(code, func, globalOffsets, locals, metas, stack, stream, block.jump.target);
+      encodeJumpTarget(info, locals, metas, stack, stream, block.jump.target);
       if (meta.needsLabelAfter) {
         stream.push({op: Opcode.End, arg: null});
         stack.pop();
@@ -966,14 +1017,12 @@ function encodeBlockTree(
 
   // Only encode the next block if something jumps to it
   if (meta.isNextTarget && block.next !== null) {
-    encodeBlockTree(code, func, globalOffsets, locals, metas, stack, stream, block.next);
+    encodeBlockTree(info, locals, metas, stack, stream, block.next);
   }
 }
 
 function encodeJumpTarget(
-  code: Code,
-  func: Func,
-  globalOffsets: number[],
+  info: EncodeInfo,
   locals: Locals,
   metas: BlockMeta[],
   stack: LabelStackEntry[],
@@ -984,7 +1033,7 @@ function encodeJumpTarget(
 
   switch (target.kind) {
     case 'Child':
-      encodeBlockTree(code, func, globalOffsets, locals, metas, stack, stream, target.index);
+      encodeBlockTree(info, locals, metas, stack, stream, target.index);
       return;
 
     case 'Next':
@@ -1013,13 +1062,22 @@ function encodeJumpTarget(
   }
 }
 
-function encodeFunc(code: Code, func: Func, globalOffsets: number[], bb: ByteBuffer): void {
+interface EncodeInfo {
+  code: Code;
+  func: Func;
+  globalOffsets: number[];
+  typeInfo: TypeInfo;
+}
+
+function encodeFunc(info: EncodeInfo, bb: ByteBuffer): void {
+  const {func} = info;
+
   // Generate the instructions
   const metas = buildBlockMetas(func);
   const locals = createLocals(func);
   const stream: OpArg[] = [];
   const stack: LabelStackEntry[] = [];
-  encodeBlockTree(code, func, globalOffsets, locals, metas, stack, stream, 0);
+  encodeBlockTree(info, locals, metas, stack, stream, 0);
 
   // Write the function body
   const remap = finishLocals(locals, bb);
