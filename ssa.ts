@@ -14,6 +14,7 @@ export enum RawType {
 
 export type Ins =
   {kind: 'Call', index: number, args: InsRef[], retType: RawType} |
+  {kind: 'CallIntrinsic', name: string, args: InsRef[], retType: RawType} |
 
   {kind: 'PtrGlobal', index: number} |
   {kind: 'PtrStack', index: number} |
@@ -246,6 +247,8 @@ export function addLocalSet(func: Func, block: number, local: number, value: Val
 export function argsOf(ins: Ins): InsRef[] {
   switch (ins.kind) {
     case 'Call': return ins.args;
+    case 'CallIntrinsic': return ins.args;
+
     case 'PtrGlobal': return [];
     case 'PtrStack': return [];
 
@@ -344,6 +347,12 @@ function blockToString(context: ToStringContext, block: BasicBlock, indent: stri
           args.push(refToString(context.func, arg));
         }
         text += `${indent}t${i} = call ${args.join(', ')}\n`;
+        break;
+      }
+
+      case 'CallIntrinsic': {
+        const args = ins.args.map(arg => refToString(context.func, arg));
+        text += `${indent}t${i} = ${ins.name} ${args.join(', ')}\n`;
         break;
       }
 
@@ -567,6 +576,7 @@ export function typeOf(func: Func, block: number, ref: InsRef): RawType {
       return func.ptrType;
 
     case 'Call':
+    case 'CallIntrinsic':
       return ins.retType;
 
     case 'MemGet8':
@@ -689,4 +699,21 @@ export function hasMissingReturn(func: Func, metas: BlockMeta[]): boolean {
     }
   }
   return false;
+}
+
+export function isValidIntrinsicSignature(
+  args: RawType[], retType: RawType,
+  expectedArgs: RawType[], expectedRetType: RawType,
+): boolean {
+  if (args.length !== expectedArgs.length || retType !== expectedRetType) {
+    return false;
+  }
+
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] !== expectedArgs[i]) {
+      return false;
+    }
+  }
+
+  return true;
 }

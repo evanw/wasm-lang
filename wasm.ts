@@ -11,6 +11,7 @@ import {
   JumpTarget,
   RawType,
   typeOf,
+  isValidIntrinsicSignature,
 } from './ssa';
 import { align } from './util';
 
@@ -454,10 +455,12 @@ interface OpArg {
   arg: number | null;
 }
 
-function encodeIns(func: Func, globalOffsets: number[], args: InsRef[], opArgs: OpArg[], ins: Ins): void {
+function encodeIns(context: BlockContext, args: InsRef[], ins: Ins): void {
+  const opArgs = context.opArgs;
+
   switch (ins.kind) {
     case 'PtrGlobal':
-      opArgs.push({op: Opcode.I32Const, arg: globalOffsets[ins.index]});
+      opArgs.push({op: Opcode.I32Const, arg: context.globalOffsets[ins.index]});
       break;
 
     case 'PtrStack':
@@ -505,6 +508,36 @@ function encodeIns(func: Func, globalOffsets: number[], args: InsRef[], opArgs: 
       args.push(...ins.args);
       break;
 
+    case 'CallIntrinsic': {
+      const argTypes: RawType[] = [];
+      for (const arg of ins.args) {
+        const isConstant = getConstant(context.func, arg) !== null;
+        argTypes.push(isConstant ? RawType.I32 : typeOf(context.func, context.blockIndex, arg));
+      }
+
+      switch (ins.name) {
+        case 'wasm.grow_memory':
+          if (!isValidIntrinsicSignature(argTypes, ins.retType, [RawType.I32], RawType.I32)) {
+            throw new Error(`The intrinsic "${ins.name}" is invalid`);
+          }
+          opArgs.push({op: Opcode.GrowMemory, arg: 0});
+          break;
+
+        case 'wasm.current_memory':
+          if (!isValidIntrinsicSignature(argTypes, ins.retType, [], RawType.I32)) {
+            throw new Error(`The intrinsic "${ins.name}" is invalid`);
+          }
+          opArgs.push({op: Opcode.CurrentMemory, arg: 0});
+          break;
+
+        default:
+          throw new Error(`Invalid WebAssembly intrinsic name "${ins.name}"`);
+      }
+
+      args.push(...ins.args);
+      break;
+    }
+
     case 'LocalGet':
       opArgs.push({op: Opcode.GetLocal, arg: ins.local});
       break;
@@ -526,8 +559,8 @@ function encodeIns(func: Func, globalOffsets: number[], args: InsRef[], opArgs: 
       throw new Error('Not yet implemented');
 
     case 'Eq32': {
-      const leftConst = getConstant(func, ins.left);
-      const rightConst = getConstant(func, ins.right);
+      const leftConst = getConstant(context.func, ins.left);
+      const rightConst = getConstant(context.func, ins.right);
       if (leftConst === 0) {
         opArgs.push({op: Opcode.I32Eqz, arg: null});
         args.push(ins.right);
@@ -692,7 +725,7 @@ interface BlockContext {
 function visitIns(context: BlockContext): void {
   const block = context.func.blocks[context.blockIndex];
   const args: InsRef[] = [];
-  encodeIns(context.func, context.globalOffsets, args, context.opArgs, block.insList[context.insIndex]);
+  encodeIns(context, args, block.insList[context.insIndex]);
 
   // Encode the args in reverse because we're encoding from the bottom up
   for (let i = args.length - 1; i >= 0; i--) {

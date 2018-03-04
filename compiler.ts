@@ -1,5 +1,5 @@
 import { Log, Range, appendToLog } from './log';
-import { Parsed, TypeExpr, CtorDecl, DefDecl, Stmt, Expr, BinOp, UnOp } from './parser';
+import { Parsed, TypeExpr, CtorDecl, DefDecl, Stmt, Expr, BinOp, UnOp, Tag } from './parser';
 import {
   addIns,
   addLocalGet,
@@ -63,10 +63,15 @@ interface TypeData {
   allocSize: number;
 }
 
+type DefKind =
+  {kind: 'Func', index: number} |
+  {kind: 'Intrinsic', name: string};
+
 interface DefData {
   name: string;
   args: ArgData[];
   retTypeID: TypeID;
+  kind: DefKind;
 }
 
 type GlobalRef =
@@ -306,27 +311,85 @@ interface Scope {
   locals: Map<string, Local>;
 }
 
+function findTag(context: Context, def: DefDecl, name: string): Tag | null {
+  let found: Tag | null = null;
+
+  for (const tag of def.tags) {
+    if (tag.name === name) {
+      if (found === null) {
+        found = tag;
+      } else {
+        appendToLog(context.log, tag.range, `Duplicate tag "${name}"`);
+      }
+    }
+  }
+
+  return found;
+}
+
 function compileDefs(context: Context, parsed: Parsed): void {
   const list: [number, DefDecl][] = [];
 
   // Resolve all argument types and return types
   for (const def of parsed.defs) {
-    if (defineGlobal(context, def.nameRange, def.name, {kind: 'Def', defID: context.defs.length})) {
-      const args: ArgData[] = [];
-      for (const arg of def.args) {
-        const typeID = resolveTypeExpr(context, arg.type);
-        args.push({typeID, name: arg.name, isKey: arg.isKey, isRef: arg.isRef});
+    const args: ArgData[] = [];
+    for (const arg of def.args) {
+      const typeID = resolveTypeExpr(context, arg.type);
+      args.push({typeID, name: arg.name, isKey: arg.isKey, isRef: arg.isRef});
+    }
+    const retTypeID = resolveTypeExpr(context, def.ret);
+    const intrinsicTag = findTag(context, def, "intrinsic");
+    let intrinsicName: string | null = null;
+    let kind: DefKind;
+
+    // Try to resolve the intrinsic name
+    if (intrinsicTag !== null) {
+      if (intrinsicTag.args.length !== 1) {
+        appendToLog(context.log, intrinsicTag.range, `The "@intrinsic" tag takes one argument`);
+      } else {
+        const name = intrinsicTag.args[0];
+        if (name.kind.kind !== 'String') {
+          appendToLog(context.log, name.range, `The "@intrinsic" argument must be a string`);
+        } else {
+          intrinsicName = name.kind.value;
+        }
       }
-      const retTypeID = resolveTypeExpr(context, def.ret);
+    }
+
+    // Intrinsic functions should not have a body
+    if (intrinsicName !== null) {
+      let name = '(error)';
+      if (def.body !== null) {
+        appendToLog(context.log, def.nameRange, `Intrinsic functions cannot be implemented`);
+      }
+      kind = {kind: 'Intrinsic', name: intrinsicName};
+    }
+
+    // Regular functions should have a body
+    else {
+      const func = createFunc(def.name, context.ptrType);
+      kind = {kind: 'Func', index: context.code.funcs.length};
+      context.code.funcs.push(func);
+      if (def.body === null && intrinsicTag === null) {
+        appendToLog(context.log, def.nameRange, `Must implement "${def.name}"`);
+      }
+    }
+
+    // Check for name conflicts first
+    if (defineGlobal(context, def.nameRange, def.name, {kind: 'Def', defID: context.defs.length})) {
       list.push([context.defs.length, def]);
-      context.defs.push({name: def.name, args, retTypeID});
+      context.defs.push({name: def.name, args, retTypeID, kind});
     }
   }
 
-  // Compile each function
+  // Compile each function that has an implementation
   for (const [defID, def] of list) {
     const data = context.defs[defID];
-    const func = createFunc(def.name, context.ptrType);
+    if (data.kind.kind !== 'Func') {
+      continue;
+    }
+
+    const func = context.code.funcs[data.kind.index];
     const scope: Scope = {parent: null, locals: new Map()};
 
     // Add a local variable for each argument
@@ -340,8 +403,9 @@ function compileDefs(context: Context, parsed: Parsed): void {
     // Compile the body
     context.currentBlock = createBlock(func);
     func.retType = rawTypeForTypeID(context, data.retTypeID);
-    compileStmts(context, def.body, func, scope, data.retTypeID);
-    context.code.funcs.push(func);
+    if (def.body !== null) {
+      compileStmts(context, def.body, func, scope, data.retTypeID);
+    }
 
     // Check for a missing return statement
     if (data.retTypeID !== context.voidTypeID) {
@@ -871,10 +935,26 @@ function compileExpr(context: Context, expr: Expr, func: Func, scope: Scope, cas
         for (const result of results) {
           args.push(unwrapRef(func, context.currentBlock, result.value));
         }
-        result = {
-          typeID: def.retTypeID,
-          value: addIns(func, context.currentBlock, {kind: 'Call', index: global.defID, args, retType}),
-        };
+        switch (def.kind.kind) {
+          case 'Func':
+            result = {
+              typeID: def.retTypeID,
+              value: addIns(func, context.currentBlock, {kind: 'Call', index: def.kind.index, args, retType}),
+            };
+            break;
+
+          case 'Intrinsic':
+            result = {
+              typeID: def.retTypeID,
+              value: addIns(func, context.currentBlock, {kind: 'CallIntrinsic', name: def.kind.name, args, retType}),
+            };
+            break;
+
+          default: {
+            const checkCovered: void = def.kind;
+            throw new Error('Internal error');
+          }
+        }
       }
 
       else {

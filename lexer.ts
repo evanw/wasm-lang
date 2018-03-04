@@ -17,6 +17,7 @@ export enum Token {
   Ampersand,
   AmpersandAmpersand,
   Asterisk,
+  AtSign,
   Bar,
   BarBar,
   Caret,
@@ -142,6 +143,7 @@ export function advance(lexer: Lexer): void {
       case ']': lexer.token = Token.CloseBracket; break;
       case '{': lexer.token = Token.OpenBrace; break;
       case '}': lexer.token = Token.CloseBrace; break;
+      case '@': lexer.token = Token.AtSign; break;
       case '*': lexer.token = Token.Asterisk; break;
       case '/': lexer.token = Token.Slash; break;
       case '^': lexer.token = Token.Caret; break;

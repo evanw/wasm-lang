@@ -12,26 +12,35 @@ export interface VarDecl {
   range: Range;
   name: string;
   nameRange: Range;
+  tags: Tag[];
   type: TypeExpr;
   value: Expr;
+}
+
+export interface Tag {
+  range: Range;
+  name: string;
+  args: Expr[];
 }
 
 export interface DefDecl {
   range: Range;
   name: string;
   nameRange: Range;
+  tags: Tag[];
   params: ParamDecl[];
   args: ArgDecl[];
   ret: TypeExpr;
-  body: Stmt[]
+  body: Stmt[] | null;
 }
 
 export interface TypeDecl {
   range: Range;
   name: string;
   nameRange: Range;
+  tags: Tag[];
   params: ParamDecl[];
-  ctors: CtorDecl[]
+  ctors: CtorDecl[];
 }
 
 export interface ParamDecl {
@@ -235,7 +244,30 @@ function parsePrefix(lexer: Lexer): Expr | null {
     }
 
     case Token.String: {
-      const value = currentText(lexer);
+      const text = currentText(lexer);
+      const limit = text.length - 1;
+      let value = '';
+
+      for (let i = 1; i < limit; i++) {
+        let c = text[i];
+        if (c === '\\') {
+          if (i + 1 < limit) {
+            i += 1;
+            switch (text[i]) {
+              case '0': c = '\0'; break;
+              case 'b': c = '\b'; break;
+              case 'n': c = '\n'; break;
+              case 'r': c = '\r'; break;
+              case 't': c = '\t'; break;
+              default: appendToLog(lexer.log, currentRange(lexer), `Invalid escape sequence in string literal`); break;
+            }
+          } else {
+            appendToLog(lexer.log, currentRange(lexer), `Invalid escape sequence in string literal`);
+          }
+        }
+        value += c;
+      }
+
       advance(lexer);
       return {range: spanSince(lexer, start), kind: {kind: 'String', value}};
     }
@@ -636,14 +668,38 @@ function parseParams(lexer: Lexer): ParamDecl[] | null {
 
 export function parse(log: Log, text: string, source: number, parsed: Parsed): boolean {
   const lexer = createLexer(log, text, source);
+  let tags: Tag[] = [];
 
-  while (lexer.token !== Token.EndOfFile) {
+  while (lexer.token! !== Token.EndOfFile) {
     const start = lexer.start;
 
     switch (lexer.token!) {
       case Token.Newline:
         advance(lexer);
+        continue;
+
+      case Token.AtSign: {
+        advance(lexer);
+        const name = currentText(lexer);
+        if (!expect(lexer, Token.Identifier)) return false;
+        const args: Expr[] = [];
+        if (eat(lexer, Token.OpenParenthesis)) {
+          eat(lexer, Token.Newline);
+
+          while (lexer.token !== Token.CloseBracket) {
+            const arg = parseExpr(lexer, LEVEL_LOWEST);
+            if (arg === null) return false;
+            args.push(arg);
+            if (!eat(lexer, Token.Comma)) break;
+            eat(lexer, Token.Newline);
+          }
+
+          eat(lexer, Token.Newline);
+          if (!expect(lexer, Token.CloseParenthesis)) return false;
+        }
+        tags.push({range: spanSince(lexer, start), name, args});
         break;
+      }
 
       case Token.Var: {
         advance(lexer);
@@ -656,7 +712,8 @@ export function parse(log: Log, text: string, source: number, parsed: Parsed): b
         if (type === null || !expect(lexer, Token.Equals)) return false;
         const value = parseExpr(lexer, LEVEL_LOWEST);
         if (value === null) return false;
-        parsed.vars.push({range: spanSince(lexer, start), name, nameRange, type, value});
+        parsed.vars.push({range: spanSince(lexer, start), name, nameRange, tags, type, value});
+        tags = [];
         break;
       }
 
@@ -680,9 +737,13 @@ export function parse(log: Log, text: string, source: number, parsed: Parsed): b
           ? {range: currentRange(lexer), kind: {kind: 'Void'}}
           : parseType(lexer);
         if (ret === null) return false;
-        const body = parseStmts(lexer, 0);
-        if (body === null) return false;
-        parsed.defs.push({range: spanSince(lexer, start), name, nameRange, params, args, ret, body});
+        let body: Stmt[] | null = null;
+        if (lexer.token === Token.OpenBrace) {
+          body = parseStmts(lexer, 0);
+          if (body === null) return false;
+        }
+        parsed.defs.push({range: spanSince(lexer, start), name, nameRange, tags, params, args, ret, body});
+        tags = [];
         break;
       }
 
@@ -730,7 +791,8 @@ export function parse(log: Log, text: string, source: number, parsed: Parsed): b
           ctors.push({range: spanSince(lexer, start), name, nameRange, args});
         }
 
-        parsed.types.push({range: spanSince(lexer, start), name, nameRange, params, ctors});
+        parsed.types.push({range: spanSince(lexer, start), name, nameRange, tags, params, ctors});
+        tags = [];
         break;
       }
 
@@ -739,6 +801,17 @@ export function parse(log: Log, text: string, source: number, parsed: Parsed): b
         return false;
       }
     }
+
+    // Declarations must be separated by newlines
+    if (lexer.token !== Token.EndOfFile && !expect(lexer, Token.Newline)) {
+      return false;
+    }
+  }
+
+  // If we've parsed some tags, require a declaration after the tags
+  if (tags.length !== 0) {
+    unexpected(lexer);
+    return false;
   }
 
   return true;
