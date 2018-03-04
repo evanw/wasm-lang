@@ -530,6 +530,13 @@ function encodeIns(context: BlockContext, args: InsRef[], ins: Ins): void {
           opArgs.push({op: Opcode.CurrentMemory, arg: 0});
           break;
 
+        case 'wasm.unreachable':
+          if (!isValidIntrinsicSignature(argTypes, ins.retType, [], RawType.Void)) {
+            throw new Error(`The intrinsic "${ins.name}" is invalid`);
+          }
+          opArgs.push({op: Opcode.Unreachable, arg: null});
+          break;
+
         default:
           throw new Error(`Invalid WebAssembly intrinsic name "${ins.name}"`);
       }

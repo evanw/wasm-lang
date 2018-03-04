@@ -733,9 +733,8 @@ export function parse(log: Log, text: string, source: number, parsed: Parsed): b
           advance(lexer);
         }
 
-        const ret: TypeExpr | null = lexer.token === Token.OpenBrace
-          ? {range: currentRange(lexer), kind: {kind: 'Void'}}
-          : parseType(lexer);
+        const ret: TypeExpr | null = lexer.token === Token.OpenBrace || lexer.token === Token.Newline
+          ? {range: currentRange(lexer), kind: {kind: 'Void'}} : parseType(lexer);
         if (ret === null) return false;
         let body: Stmt[] | null = null;
         if (lexer.token === Token.OpenBrace) {

@@ -12,6 +12,40 @@ const library = `
 type int
 type bool
 type string
+
+@intrinsic("wasm.grow_memory")
+def _growMemory(pageCount int) int
+
+@intrinsic("wasm.current_memory")
+def _currentMemory() int
+
+@intrinsic("wasm.unreachable")
+def _abort()
+
+var _ptr = 0
+var _end = 0
+
+def _malloc(size int) int {
+  if _ptr + size > _end {
+    # Lazily initialize
+    if _end == 0 {
+      _end = _currentMemory() * 65536
+      _ptr = _end
+    }
+
+    # Ask for more pages
+    var pages = (_end - (_ptr + size) + 65535) / 65536
+    if _growMemory(pages) == -1 {
+      _abort()
+    }
+    _end = _end + pages * 65536
+  }
+
+  # Use a bump allocator
+  var ptr = _ptr
+  _ptr = (_ptr + size + 7) & ~7
+  return ptr
+}
 `;
 
 export async function main(): Promise<void> {
