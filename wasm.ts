@@ -430,7 +430,7 @@ export function encodeWASM(code: Code): Uint8Array {
   codeBB.writeVarU(code.funcs.length);
   for (const func of code.funcs) {
     const bodyBB = new ByteBuffer;
-    encodeFunc(func, globalOffsets, bodyBB);
+    encodeFunc(code, func, globalOffsets, bodyBB);
     codeBB.writeVarU(bodyBB.length);
     codeBB.writeBytes(bodyBB.finish());
   }
@@ -467,19 +467,18 @@ function encodeIns(context: BlockContext, args: InsRef[], ins: Ins): void {
       throw new Error('Not yet implemented');
 
     case 'MemAlloc':
-      // TODO
-      opArgs.push({op: Opcode.I32Const, arg: 0});
-      opArgs.push({op: Opcode.Drop, arg: null});
-      opArgs.push({op: Opcode.GrowMemory, arg: 0});
-      opArgs.push({op: Opcode.I32Const, arg: 1});
-      opArgs.push({op: Opcode.Drop, arg: null});
+      if (context.code.mallocIndex === null) {
+        throw new Error('Cannot allocate memory because "malloc" is missing');
+      }
+      opArgs.push({op: Opcode.Call, arg: context.code.mallocIndex});
       args.push(ins.size);
       break;
 
     case 'MemFree':
-      // TODO
-      opArgs.push({op: Opcode.Drop, arg: null});
-      opArgs.push({op: Opcode.Drop, arg: null});
+      if (context.code.freeIndex === null) {
+        throw new Error('Cannot free memory because "free" is missing');
+      }
+      opArgs.push({op: Opcode.Call, arg: context.code.freeIndex});
       args.push(ins.ptr, ins.size);
       break;
 
@@ -723,6 +722,7 @@ function finishLocals(locals: Locals, bb: ByteBuffer): number[] {
 }
 
 interface BlockContext {
+  code: Code;
   func: Func;
   globalOffsets: number[];
   locals: Locals;
@@ -825,6 +825,7 @@ interface LabelStackEntry {
 }
 
 function encodeBlockTree(
+  code: Code,
   func: Func,
   globalOffsets: number[],
   locals: Locals,
@@ -836,6 +837,7 @@ function encodeBlockTree(
   const block = func.blocks[blockIndex];
   const opArgs: OpArg[] = [];
   const context: BlockContext = {
+    code,
     func,
     globalOffsets,
     locals,
@@ -923,12 +925,12 @@ function encodeBlockTree(
       }
 
       stream.push({op: Opcode.If, arg: Type.Empty});
-      encodeJumpTarget(func, globalOffsets, locals, metas, stack, stream, yes);
+      encodeJumpTarget(code, func, globalOffsets, locals, metas, stack, stream, yes);
 
       // Only create an "else" if it's not a fallthrough
       if (no.kind !== 'Next' || no.parent !== blockIndex) {
         stream.push({op: Opcode.Else, arg: null});
-        encodeJumpTarget(func, globalOffsets, locals, metas, stack, stream, no);
+        encodeJumpTarget(code, func, globalOffsets, locals, metas, stack, stream, no);
       }
 
       stream.push({op: Opcode.End, arg: null});
@@ -943,7 +945,7 @@ function encodeBlockTree(
         stack.push({blockIndex, isLoop: false});
         stream.push({op: Opcode.Block, arg: Type.Empty});
       }
-      encodeJumpTarget(func, globalOffsets, locals, metas, stack, stream, block.jump.target);
+      encodeJumpTarget(code, func, globalOffsets, locals, metas, stack, stream, block.jump.target);
       if (meta.needsLabelAfter) {
         stream.push({op: Opcode.End, arg: null});
         stack.pop();
@@ -964,11 +966,12 @@ function encodeBlockTree(
 
   // Only encode the next block if something jumps to it
   if (meta.isNextTarget && block.next !== null) {
-    encodeBlockTree(func, globalOffsets, locals, metas, stack, stream, block.next);
+    encodeBlockTree(code, func, globalOffsets, locals, metas, stack, stream, block.next);
   }
 }
 
 function encodeJumpTarget(
+  code: Code,
   func: Func,
   globalOffsets: number[],
   locals: Locals,
@@ -981,7 +984,7 @@ function encodeJumpTarget(
 
   switch (target.kind) {
     case 'Child':
-      encodeBlockTree(func, globalOffsets, locals, metas, stack, stream, target.index);
+      encodeBlockTree(code, func, globalOffsets, locals, metas, stack, stream, target.index);
       return;
 
     case 'Next':
@@ -1010,13 +1013,13 @@ function encodeJumpTarget(
   }
 }
 
-function encodeFunc(func: Func, globalOffsets: number[], bb: ByteBuffer): void {
+function encodeFunc(code: Code, func: Func, globalOffsets: number[], bb: ByteBuffer): void {
   // Generate the instructions
   const metas = buildBlockMetas(func);
   const locals = createLocals(func);
   const stream: OpArg[] = [];
   const stack: LabelStackEntry[] = [];
-  encodeBlockTree(func, globalOffsets, locals, metas, stack, stream, 0);
+  encodeBlockTree(code, func, globalOffsets, locals, metas, stack, stream, 0);
 
   // Write the function body
   const remap = finishLocals(locals, bb);

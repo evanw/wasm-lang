@@ -140,6 +140,8 @@ export interface Global {
 export interface Code {
   funcs: Func[];
   globals: Global[];
+  mallocIndex: number | null;
+  freeIndex: number | null;
 }
 
 export function createFunc(name: string, ptrType: RawType): Func {

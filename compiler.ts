@@ -368,10 +368,20 @@ function compileDefs(context: Context, parsed: Parsed): void {
     // Regular functions should have a body
     else {
       const func = createFunc(def.name, context.ptrType);
-      kind = {kind: 'Func', index: context.code.funcs.length};
+      const index = context.code.funcs.length;
+      kind = {kind: 'Func', index};
       context.code.funcs.push(func);
       if (def.body === null && intrinsicTag === null) {
         appendToLog(context.log, def.nameRange, `Must implement "${def.name}"`);
+      }
+
+      // Remember where "malloc" and "free" are from the library
+      if (def.range.source === 0) {
+        if (def.name === "_malloc") {
+          context.code.mallocIndex = index;
+        } else if (def.name === "_free") {
+          context.code.freeIndex = index;
+        }
       }
     }
 
@@ -1231,7 +1241,13 @@ function compileVars(context: Context, parsed: Parsed): void {
 
 export function compile(log: Log, parsed: Parsed, ptrType: RawType): Code {
   const context: Context = {
-    code: {funcs: [], globals: []},
+    code: {
+      funcs: [],
+      globals: [],
+      mallocIndex: null,
+      freeIndex: null,
+    },
+
     log,
     ptrType,
     types: [],
