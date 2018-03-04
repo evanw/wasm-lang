@@ -720,12 +720,25 @@ function encodeBlockTree(
     // TODO: may need a "drop" here
   }
 
-  // Wrap loops in a special label
-  const isLoop = metas[blockIndex].isLoopTarget;
-  if (isLoop) {
-    stream.push({op: Opcode.Block, arg: Type.Empty});
+  // Loops have two labels, one for "break" and one for "continue". Loop blocks
+  // suppress generation of any labels below when we're looking at the jump
+  // because we want child "next" jumps to this node to break out of the loop
+  // instead of continue to the next loop iteration.
+  //
+  // One optimization we can do here is skipping the one for "break" if the
+  // loop is never broken. This could be the case if the body contains a
+  // "return" that leaves the loop without breaking it or a jump to a block
+  // that encloses this loop. We can detect this by checking that we aren't
+  // the target of a "next" target.
+  const meta = metas[blockIndex];
+  const isNextTarget = meta.isNextTarget;
+  const isLoopTarget = meta.isLoopTarget;
+  if (isLoopTarget) {
+    if (isNextTarget) {
+      stream.push({op: Opcode.Block, arg: Type.Empty});
+      stack.push({blockIndex, isLoop: false});
+    }
     stream.push({op: Opcode.Loop, arg: Type.Empty});
-    stack.push({blockIndex, isLoop: false});
     stack.push({blockIndex, isLoop: true});
   }
 
@@ -746,7 +759,9 @@ function encodeBlockTree(
 
     case 'Branch': {
       const {yes, no} = block.jump;
-      stack.push({blockIndex, isLoop: false});
+      if (!isLoopTarget) {
+        stack.push({blockIndex, isLoop: false});
+      }
       stream.push({op: Opcode.If, arg: Type.Empty});
       encodeJumpTarget(func, locals, metas, stack, stream, yes);
       if (no.kind !== 'Next' || no.parent !== blockIndex) {
@@ -754,16 +769,22 @@ function encodeBlockTree(
         encodeJumpTarget(func, locals, metas, stack, stream, no);
       }
       stream.push({op: Opcode.End, arg: null});
-      stack.pop();
+      if (!isLoopTarget) {
+        stack.pop();
+      }
       break;
     }
 
     case 'Goto':
-      stack.push({blockIndex, isLoop: false});
-      stream.push({op: Opcode.Block, arg: Type.Empty});
+      if (!isLoopTarget) {
+        stack.push({blockIndex, isLoop: false});
+        stream.push({op: Opcode.Block, arg: Type.Empty});
+      }
       encodeJumpTarget(func, locals, metas, stack, stream, block.jump.target);
-      stream.push({op: Opcode.End, arg: null});
-      stack.pop();
+      if (!isLoopTarget) {
+        stream.push({op: Opcode.End, arg: null});
+        stack.pop();
+      }
       break;
 
     default: {
@@ -773,15 +794,17 @@ function encodeBlockTree(
   }
 
   // End any control flow constructs we created above
-  if (isLoop) {
-    stream.push({op: Opcode.End, arg: null});
+  if (isLoopTarget) {
     stream.push({op: Opcode.End, arg: null});
     stack.pop();
-    stack.pop();
+    if (isNextTarget) {
+      stream.push({op: Opcode.End, arg: null});
+      stack.pop();
+    }
   }
 
   // Only encode the next block if something jumps to it
-  if (block.next !== null && metas[blockIndex].isNextTarget) {
+  if (isNextTarget && block.next !== null) {
     encodeBlockTree(func, locals, metas, stack, stream, block.next);
   }
 }
@@ -815,9 +838,8 @@ function encodeJumpTarget(
     }
   }
 
-  // Search the stack bottom to top since loops will have two stack entries
-  // with "isLoop: false" and we want the older one (the one outside the loop)
-  for (let i = 0; i < stack.length; i++) {
+  // Search the block stack for the parent from most recent to least recent
+  for (let i = stack.length - 1; i >= 0; i--) {
     const entry = stack[i];
 
     if (entry.blockIndex === parent.blockIndex && entry.isLoop === parent.isLoop) {
