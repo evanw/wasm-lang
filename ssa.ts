@@ -558,10 +558,11 @@ export interface BlockMeta {
   isLive: boolean;
   isNextTarget: boolean;
   isLoopTarget: boolean;
+  needsLabelAfter: boolean;
 }
 
 export function buildBlockMetas(func: Func): BlockMeta[] {
-  const stack: number[] = []; // TODO: Either use this or remove it
+  const stack: number[] = [];
   const metas: BlockMeta[] = [];
 
   for (const block of func.blocks) {
@@ -569,6 +570,7 @@ export function buildBlockMetas(func: Func): BlockMeta[] {
       isLive: false,
       isNextTarget: false,
       isLoopTarget: false,
+      needsLabelAfter: false,
     });
   }
 
@@ -619,6 +621,11 @@ function visitJumpTarget(func: Func, metas: BlockMeta[], stack: number[], target
     case 'Next': {
       const meta = metas[target.parent];
       meta.isNextTarget = true;
+
+      // Be conservative for now (TODO: actual fallthrough detection)
+      if (stack[stack.length - 1] !== target.parent) {
+        meta.needsLabelAfter = true;
+      }
       break;
     }
 

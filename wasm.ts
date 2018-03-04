@@ -655,7 +655,57 @@ function visitArg(context: BlockContext, arg: InsRef): void {
   }
 }
 
-interface StackEntry {
+function getInverseComparison(opcode: Opcode): Opcode | null {
+  switch (opcode) {
+    // 32-bit
+    case Opcode.I32Eq: return Opcode.I32Ne;
+    case Opcode.I32Ne: return Opcode.I32Eq;
+    case Opcode.I32LtS: return Opcode.I32GeS;
+    case Opcode.I32LtU: return Opcode.I32GeU;
+    case Opcode.I32GtS: return Opcode.I32LeS;
+    case Opcode.I32GtU: return Opcode.I32LeU;
+    case Opcode.I32LeS: return Opcode.I32GtS;
+    case Opcode.I32LeU: return Opcode.I32GtU;
+    case Opcode.I32GeS: return Opcode.I32LtS;
+    case Opcode.I32GeU: return Opcode.I32LtU;
+
+    // 64-bit
+    case Opcode.I64Eq: return Opcode.I64Ne;
+    case Opcode.I64Ne: return Opcode.I64Eq;
+    case Opcode.I64LtS: return Opcode.I64GeS;
+    case Opcode.I64LtU: return Opcode.I64GeU;
+    case Opcode.I64GtS: return Opcode.I64LeS;
+    case Opcode.I64GtU: return Opcode.I64LeU;
+    case Opcode.I64LeS: return Opcode.I64GtS;
+    case Opcode.I64LeU: return Opcode.I64GtU;
+    case Opcode.I64GeS: return Opcode.I64LtS;
+    case Opcode.I64GeU: return Opcode.I64LtU;
+  }
+
+  return null;
+}
+
+function invertLastBooleanValue(stream: OpArg[]): void {
+  const last = stream[stream.length - 1];
+
+  // First try to invert the operation
+  const inverse = getInverseComparison(last.op);
+  if (inverse !== null) {
+    last.op = inverse;
+  }
+
+  // Then try to remove the operation
+  else if (last.op === Opcode.I32Eqz) {
+    stream.pop();
+  }
+
+  // Otherwise, apply another invert
+  else {
+    stream.push({op: Opcode.I32Eqz, arg: null});
+  }
+}
+
+interface LabelStackEntry {
   blockIndex: number;
   isLoop: boolean;
 }
@@ -664,7 +714,7 @@ function encodeBlockTree(
   func: Func,
   locals: Locals,
   metas: BlockMeta[],
-  stack: StackEntry[],
+  stack: LabelStackEntry[],
   stream: OpArg[],
   blockIndex: number,
 ): void {
@@ -720,24 +770,10 @@ function encodeBlockTree(
     // TODO: may need a "drop" here
   }
 
-  // Loops have two labels, one for "break" and one for "continue". Loop blocks
-  // suppress generation of any labels below when we're looking at the jump
-  // because we want child "next" jumps to this node to break out of the loop
-  // instead of continue to the next loop iteration.
-  //
-  // One optimization we can do here is skipping the one for "break" if the
-  // loop is never broken. This could be the case if the body contains a
-  // "return" that leaves the loop without breaking it or a jump to a block
-  // that encloses this loop. We can detect this by checking that we aren't
-  // the target of a "next" target.
+  // Loops in WebAssembly are a special block where the label comes before the
+  // block instead of afterwards.
   const meta = metas[blockIndex];
-  const isNextTarget = meta.isNextTarget;
-  const isLoopTarget = meta.isLoopTarget;
-  if (isLoopTarget) {
-    if (isNextTarget) {
-      stream.push({op: Opcode.Block, arg: Type.Empty});
-      stack.push({blockIndex, isLoop: false});
-    }
+  if (meta.isLoopTarget) {
     stream.push({op: Opcode.Loop, arg: Type.Empty});
     stack.push({blockIndex, isLoop: true});
   }
@@ -758,30 +794,41 @@ function encodeBlockTree(
       break;
 
     case 'Branch': {
-      const {yes, no} = block.jump;
-      if (!isLoopTarget) {
+      let {yes, no} = block.jump;
+      if (!meta.isLoopTarget) {
         stack.push({blockIndex, isLoop: false});
       }
+
+      // If the "then" branch just falls through to the next statement, swap it
+      // with the "else" branch. That way we can avoid the "else" altogether.
+      if (yes.kind === 'Next' && yes.parent === blockIndex) {
+        [yes, no] = [no, yes];
+        invertLastBooleanValue(stream);
+      }
+
       stream.push({op: Opcode.If, arg: Type.Empty});
       encodeJumpTarget(func, locals, metas, stack, stream, yes);
+
+      // Only create an "else" if it's not a fallthrough
       if (no.kind !== 'Next' || no.parent !== blockIndex) {
         stream.push({op: Opcode.Else, arg: null});
         encodeJumpTarget(func, locals, metas, stack, stream, no);
       }
+
       stream.push({op: Opcode.End, arg: null});
-      if (!isLoopTarget) {
+      if (!meta.isLoopTarget) {
         stack.pop();
       }
       break;
     }
 
     case 'Goto':
-      if (!isLoopTarget) {
+      if (meta.needsLabelAfter) {
         stack.push({blockIndex, isLoop: false});
         stream.push({op: Opcode.Block, arg: Type.Empty});
       }
       encodeJumpTarget(func, locals, metas, stack, stream, block.jump.target);
-      if (!isLoopTarget) {
+      if (meta.needsLabelAfter) {
         stream.push({op: Opcode.End, arg: null});
         stack.pop();
       }
@@ -794,17 +841,13 @@ function encodeBlockTree(
   }
 
   // End any control flow constructs we created above
-  if (isLoopTarget) {
+  if (meta.isLoopTarget) {
     stream.push({op: Opcode.End, arg: null});
     stack.pop();
-    if (isNextTarget) {
-      stream.push({op: Opcode.End, arg: null});
-      stack.pop();
-    }
   }
 
   // Only encode the next block if something jumps to it
-  if (isNextTarget && block.next !== null) {
+  if (meta.isNextTarget && block.next !== null) {
     encodeBlockTree(func, locals, metas, stack, stream, block.next);
   }
 }
@@ -813,11 +856,11 @@ function encodeJumpTarget(
   func: Func,
   locals: Locals,
   metas: BlockMeta[],
-  stack: StackEntry[],
+  stack: LabelStackEntry[],
   stream: OpArg[],
   target: JumpTarget,
 ): void {
-  let parent: StackEntry | null = null;
+  let parent: LabelStackEntry | null = null;
 
   switch (target.kind) {
     case 'Child':
@@ -838,17 +881,16 @@ function encodeJumpTarget(
     }
   }
 
-  // Search the block stack for the parent from most recent to least recent
+  // Search the label stack for the parent from most recent to least recent.
+  // If we don't find a label, then this must be a fallthrough jump.
   for (let i = stack.length - 1; i >= 0; i--) {
     const entry = stack[i];
 
     if (entry.blockIndex === parent.blockIndex && entry.isLoop === parent.isLoop) {
       stream.push({op: Opcode.Br, arg: stack.length - i - 1});
-      return;
+      break;
     }
   }
-
-  throw new Error('Internal error');
 }
 
 function encodeFunc(func: Func, bb: ByteBuffer): void {
@@ -856,7 +898,7 @@ function encodeFunc(func: Func, bb: ByteBuffer): void {
   const metas = buildBlockMetas(func);
   const locals = createLocals(func);
   const stream: OpArg[] = [];
-  const stack: StackEntry[] = [];
+  const stack: LabelStackEntry[] = [];
   encodeBlockTree(func, locals, metas, stack, stream, 0);
 
   // Write the function body
