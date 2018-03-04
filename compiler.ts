@@ -1,7 +1,26 @@
 import { Log, Range, appendToLog } from './log';
 import { Parsed, TypeExpr, CtorDecl, DefDecl, Stmt, Expr, BinOp, UnOp } from './parser';
-import { Func, RawType, createFunc, createLocal, ValueRef, createConstant, addLocalGet,
-  Code, createBlock, addLocalSet, setJump, addIns, InsRef, unwrapRef, setNext, Ins, hasMissingReturn, JumpTarget, buildBlockMetas } from './ssa';
+import {
+  addIns,
+  addLocalGet,
+  addLocalSet,
+  buildBlockMetas,
+  Code,
+  createBlock,
+  createConstant,
+  createFunc,
+  createLocal,
+  Func,
+  hasMissingReturn,
+  Ins,
+  InsRef,
+  JumpTarget,
+  RawType,
+  setJump,
+  setNext,
+  unwrapRef,
+  ValueRef,
+} from './ssa';
 
 interface TypeID {
   index: number;
@@ -123,6 +142,9 @@ function compileTypes(context: Context, parsed: Parsed): void {
   for (const decl of parsed.types) {
     if (decl.params.length === 0) {
       const typeID = addTypeID(context, decl.nameRange, decl.name);
+      if (typeID === context.errorTypeID) {
+        continue;
+      }
       const data = context.types[typeID.index];
       const ctors: CtorDecl[] = [];
 
@@ -149,9 +171,9 @@ function compileTypes(context: Context, parsed: Parsed): void {
   }
 
   // Bind built-in types
-  context.boolTypeID = resolveTypeName(context, {start: 0, end: 0}, 'bool');
-  context.intTypeID = resolveTypeName(context, {start: 0, end: 0}, 'int');
-  context.stringTypeID = resolveTypeName(context, {start: 0, end: 0}, 'string');
+  context.boolTypeID = resolveTypeName(context, {source: -1, start: 0, end: 0}, 'bool');
+  context.intTypeID = resolveTypeName(context, {source: -1, start: 0, end: 0}, 'int');
+  context.stringTypeID = resolveTypeName(context, {source: -1, start: 0, end: 0}, 'string');
 
   // Add fields next
   for (const [typeID, ctors] of list) {
@@ -770,7 +792,7 @@ function compileEqual(context: Context, func: Func, scope: Scope, op: BinOp, lef
   }
 
   if (l.typeID !== r.typeID) {
-    appendToLog(context.log, {start: leftExpr.range.start, end: rightExpr.range.end},
+    appendToLog(context.log, {source: leftExpr.range.source, start: leftExpr.range.start, end: rightExpr.range.end},
       `Cannot compare type "${context.types[l.typeID.index].name}" and type "${context.types[r.typeID.index].name}"`);
     return {
       typeID: context.boolTypeID,
@@ -952,8 +974,8 @@ export function compile(log: Log, parsed: Parsed, ptrType: RawType): Code {
     stringTypeID: {index: 0},
   };
 
-  context.errorTypeID = addTypeID(context, {start: 0, end: 0}, '(error)');
-  context.voidTypeID = addTypeID(context, {start: 0, end: 0}, '(void)');
+  context.errorTypeID = addTypeID(context, {source: -1, start: 0, end: 0}, '(error)');
+  context.voidTypeID = addTypeID(context, {source: -1, start: 0, end: 0}, '(void)');
   compileTypes(context, parsed);
   compileDefs(context, parsed);
   return context.code;

@@ -2,6 +2,7 @@ import { Log, Range, appendToLog } from './log';
 import { Token, currentText, spanSince, advance, Lexer, currentRange, createLexer } from './lexer';
 
 export interface Parsed {
+  sourceNames: string[];
   vars: VarDecl[];
   defs: DefDecl[];
   types: TypeDecl[];
@@ -633,11 +634,8 @@ function parseParams(lexer: Lexer): ParamDecl[] | null {
   return params;
 }
 
-export function parse(log: Log, text: string): Parsed | null {
-  const lexer = createLexer(log, text);
-  const vars: VarDecl[] = [];
-  const defs: DefDecl[] = [];
-  const types: TypeDecl[] = [];
+export function parse(log: Log, text: string, source: number, parsed: Parsed): boolean {
+  const lexer = createLexer(log, text, source);
 
   while (lexer.token !== Token.EndOfFile) {
     const start = lexer.start;
@@ -651,14 +649,14 @@ export function parse(log: Log, text: string): Parsed | null {
         advance(lexer);
         const name = currentText(lexer);
         const nameRange = currentRange(lexer);
-        if (!expect(lexer, Token.Identifier)) return null;
+        if (!expect(lexer, Token.Identifier)) return false;
         const type: TypeExpr | null = lexer.token === Token.Equals
           ? {range: currentRange(lexer), kind: {kind: 'Inferred'}}
           : parseType(lexer);
-        if (type === null || !expect(lexer, Token.Equals)) return null;
+        if (type === null || !expect(lexer, Token.Equals)) return false;
         const value = parseExpr(lexer, LEVEL_LOWEST);
-        if (value === null) return null;
-        vars.push({range: spanSince(lexer, start), name, nameRange, type, value});
+        if (value === null) return false;
+        parsed.vars.push({range: spanSince(lexer, start), name, nameRange, type, value});
         break;
       }
 
@@ -666,11 +664,11 @@ export function parse(log: Log, text: string): Parsed | null {
         advance(lexer);
         const name = currentText(lexer);
         const nameRange = currentRange(lexer);
-        if (!expect(lexer, Token.Identifier)) return null;
+        if (!expect(lexer, Token.Identifier)) return false;
         const params = parseParams(lexer);
-        if (params === null) return null;
+        if (params === null) return false;
         const args = parseArgs(lexer);
-        if (args === null) return null;
+        if (args === null) return false;
 
         // Recover if there's a colon before the return type
         if (lexer.token === Token.Colon) {
@@ -681,26 +679,26 @@ export function parse(log: Log, text: string): Parsed | null {
         const ret: TypeExpr | null = lexer.token === Token.OpenBrace
           ? {range: currentRange(lexer), kind: {kind: 'Void'}}
           : parseType(lexer);
-        if (ret === null) return null;
+        if (ret === null) return false;
         const body = parseStmts(lexer, 0);
-        if (body === null) return null;
-        defs.push({range: spanSince(lexer, start), name, nameRange, params, args, ret, body});
+        if (body === null) return false;
+        parsed.defs.push({range: spanSince(lexer, start), name, nameRange, params, args, ret, body});
         break;
       }
 
       case Token.Identifier: {
         if (currentText(lexer) !== 'type') {
           unexpected(lexer);
-          return null;
+          return false;
         }
 
         advance(lexer);
         const ctors: CtorDecl[] = [];
         const name = currentText(lexer);
         const nameRange = currentRange(lexer);
-        if (!expect(lexer, Token.Identifier)) return null;
+        if (!expect(lexer, Token.Identifier)) return false;
         const params = parseParams(lexer);
-        if (params === null) return null;
+        if (params === null) return false;
 
         // Block form
         if (eat(lexer, Token.OpenBrace)) {
@@ -709,9 +707,9 @@ export function parse(log: Log, text: string): Parsed | null {
             const start = lexer.start;
             const name = currentText(lexer);
             const nameRange = currentRange(lexer);
-            if (!expect(lexer, Token.Identifier)) return null;
+            if (!expect(lexer, Token.Identifier)) return false;
             const args: ArgDecl[] | null = lexer.token !== Token.OpenParenthesis ? [] : parseArgs(lexer);
-            if (args === null) return null;
+            if (args === null) return false;
             ctors.push({range: spanSince(lexer, start), name, nameRange, args});
 
             // Recover if there's a semicolon or comma after a constructor
@@ -722,26 +720,26 @@ export function parse(log: Log, text: string): Parsed | null {
 
             if (!eat(lexer, Token.Newline)) break;
           }
-          if (!expect(lexer, Token.CloseBrace)) return null;
+          if (!expect(lexer, Token.CloseBrace)) return false;
         }
 
         // Simple form
         else {
           const args: ArgDecl[] | null = lexer.token === Token.Newline ? [] : parseArgs(lexer);
-          if (args === null) return null;
+          if (args === null) return false;
           ctors.push({range: spanSince(lexer, start), name, nameRange, args});
         }
 
-        types.push({range: spanSince(lexer, start), name, nameRange, params, ctors});
+        parsed.types.push({range: spanSince(lexer, start), name, nameRange, params, ctors});
         break;
       }
 
       default: {
         unexpected(lexer);
-        return null;
+        return false;
       }
     }
   }
 
-  return {vars, defs, types};
+  return true;
 }

@@ -60,20 +60,21 @@ export enum Token {
 export interface Lexer {
   log: Log;
   text: string;
+  source: number;
   token: Token;
   start: number;
   end: number;
   previousEnd: number;
 }
 
-export function createLexer(log: Log, text: string): Lexer {
-  const lexer: Lexer = {log, text, token: Token.SyntaxError, start: 0, end: 0, previousEnd: 0};
+export function createLexer(log: Log, text: string, source: number): Lexer {
+  const lexer: Lexer = {log, text, source, token: Token.SyntaxError, start: 0, end: 0, previousEnd: 0};
   advance(lexer);
   return lexer;
 }
 
 export function currentRange(lexer: Lexer): Range {
-  return {start: lexer.start, end: lexer.end};
+  return {source: lexer.source, start: lexer.start, end: lexer.end};
 }
 
 export function currentText(lexer: Lexer): string {
@@ -93,7 +94,7 @@ function isAlphaOrNumber(c: string): boolean {
 }
 
 export function spanSince(lexer: Lexer, start: number): Range {
-  return {start, end: lexer.previousEnd};
+  return {source: lexer.source, start, end: lexer.previousEnd};
 }
 
 export function advance(lexer: Lexer): void {

@@ -1,21 +1,30 @@
 import { Log, logToString } from './log';
-import { parse } from './parser';
+import { parse, Parsed } from './parser';
 import { RawType, codeToString } from './ssa';
 import { compile } from './compiler';
 import { encodeWASM } from './wasm';
 
 declare function require(name: string): any;
 declare const WebAssembly: any;
+declare const __dirname: string;
+
+const library = `
+type int
+type bool
+type string
+`;
 
 export async function main(): Promise<void> {
-  const source = require('fs').readFileSync('example.txt', 'utf8');
+  const sourceNames = ['(library)', require('path').join(__dirname, 'example.txt')];
+  const sources = [library, require('fs').readFileSync('example.txt', 'utf8')];
   const log: Log = {messages: []};
-  const parsed = parse(log, source);
-  const code = parsed && compile(log, parsed, RawType.I32);
+  const parsed: Parsed = {sourceNames, types: [], defs: [], vars: []};
+  const wasParsed = sources.every((source, i) => parse(log, source, i, parsed));
+  const code = wasParsed ? compile(log, parsed, RawType.I32) : null;
   (Error as any).stackTraceLimit = Infinity;
 
   if (log.messages.length > 0) {
-    console.log(logToString(source, log));
+    console.log(logToString(log, sourceNames, sources));
   } else if (code !== null) {
     console.log(codeToString(code));
     const wasm = encodeWASM(code);
