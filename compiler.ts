@@ -714,60 +714,63 @@ function compileArgs(context: Context, range: Range, exprs: Expr[], func: Func, 
     for (let i = 0; i < args.length; i++) {
       results.push(errorResult(context, func));
     }
+
+    return results;
   }
 
-  else {
-    for (let i = 0; i < args.length; i++) {
-      let expr = exprs[i];
-      const arg = args[i];
+  for (let i = 0; i < args.length; i++) {
+    let expr = exprs[i];
+    const arg = args[i];
 
-      // Check for an expected key
-      if (arg.isKey) {
-        if (expr.kind.kind !== 'Key') {
+    // Check for an expected key
+    if (arg.isKey) {
+      if (expr.kind.kind !== 'Key') {
+        // Allow omitting the keyword for a name expression with the same name
+        if (expr.kind.kind !== 'Name' || expr.kind.value !== arg.name) {
           appendToLog(context.log, expr.range, `Expected the keyword "${arg.name}:" before this argument`);
-        } else if (expr.kind.name !== arg.name) {
-          appendToLog(context.log, expr.kind.nameRange, `Expected "${arg.name}:" but found "${expr.kind.name}:"`);
         }
+      } else if (expr.kind.name !== arg.name) {
+        appendToLog(context.log, expr.kind.nameRange, `Expected "${arg.name}:" but found "${expr.kind.name}:"`);
       }
-
-      // Check for an unexpected key
-      else if (expr.kind.kind === 'Key') {
-        if (expr.kind.name === arg.name) {
-          appendToLog(context.log, expr.kind.nameRange, `The argument "${arg.name}" is not a keyword argument`);
-        } else {
-          appendToLog(context.log, expr.kind.nameRange, `Unexpected keyword "${expr.kind.name}:" before this argument`);
-        }
-      }
-
-      // Unwrap the key if there is one
-      if (expr.kind.kind === 'Key') {
-        expr = expr.kind.value;
-      }
-
-      // Check for an expected ref
-      if (arg.isRef) {
-        if (expr.kind.kind !== 'Ref') {
-          appendToLog(context.log, expr.range, `Expected "&" before this argument`);
-        } else {
-          const value = expr.kind.value;
-          if (value.kind.kind !== 'Name' || findLocal(scope, value.kind.value) === null) {
-            appendToLog(context.log, expr.range, `The "&" operator only works on local variable names`);
-          }
-        }
-      }
-
-      // Check for an unexpected ref
-      else if (expr.kind.kind === 'Ref') {
-        appendToLog(context.log, expr.range, `Cannot use "&" with this argument`);
-      }
-
-      // Unwrap the ref if there is one
-      if (expr.kind.kind === 'Ref') {
-        expr = expr.kind.value;
-      }
-
-      results.push(compileExpr(context, expr, func, scope, arg.typeID));
     }
+
+    // Check for an unexpected key
+    else if (expr.kind.kind === 'Key') {
+      if (expr.kind.name === arg.name) {
+        appendToLog(context.log, expr.kind.nameRange, `The argument "${arg.name}" is not a keyword argument`);
+      } else {
+        appendToLog(context.log, expr.kind.nameRange, `Unexpected keyword "${expr.kind.name}:" before this argument`);
+      }
+    }
+
+    // Unwrap the key if there is one
+    if (expr.kind.kind === 'Key') {
+      expr = expr.kind.value;
+    }
+
+    // Check for an expected ref
+    if (arg.isRef) {
+      if (expr.kind.kind !== 'Ref') {
+        appendToLog(context.log, expr.range, `Expected "&" before this argument`);
+      } else {
+        const value = expr.kind.value;
+        if (value.kind.kind !== 'Name' || findLocal(scope, value.kind.value) === null) {
+          appendToLog(context.log, expr.range, `The "&" operator only works on local variable names`);
+        }
+      }
+    }
+
+    // Check for an unexpected ref
+    else if (expr.kind.kind === 'Ref') {
+      appendToLog(context.log, expr.range, `Cannot use "&" with this argument`);
+    }
+
+    // Unwrap the ref if there is one
+    if (expr.kind.kind === 'Ref') {
+      expr = expr.kind.value;
+    }
+
+    results.push(compileExpr(context, expr, func, scope, arg.typeID));
   }
 
   return results;
