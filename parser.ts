@@ -2,6 +2,7 @@ import { Log, Range, appendToLog } from './log';
 import { Token, currentText, spanSince, advance, Lexer, currentRange, createLexer } from './lexer';
 
 export interface Parsed {
+  librarySource: number;
   sourceNames: string[];
   vars: VarDecl[];
   defs: DefDecl[];

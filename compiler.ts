@@ -99,6 +99,7 @@ interface GlobalScope {
 }
 
 interface Context {
+  librarySource: number;
   code: Code;
   log: Log;
   ptrType: RawType;
@@ -423,7 +424,7 @@ function compileDefs(context: Context, parsed: Parsed): void {
       }
 
       // Remember where "malloc" and "free" are from the library
-      if (def.range.source === 0) {
+      if (def.range.source === context.librarySource) {
         if (def.name === "_malloc") {
           context.code.mallocIndex = index;
         } else if (def.name === "_free") {
@@ -1298,6 +1299,7 @@ function compileVars(context: Context, parsed: Parsed): void {
 
 export function compile(log: Log, parsed: Parsed, ptrType: RawType): Code {
   const context: Context = {
+    librarySource: parsed.librarySource,
     code: createCode(),
     log,
     ptrType,

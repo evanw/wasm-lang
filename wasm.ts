@@ -15,9 +15,8 @@ import {
 } from './ssa';
 import { align } from './util';
 
-declare const Buffer: any;
-
 enum Section {
+  Custom = 0,
   Type = 1,
   Import = 2,
   Function = 3,
@@ -29,6 +28,12 @@ enum Section {
   Element = 9,
   Code = 10,
   Data = 11,
+}
+
+enum NameType {
+  Module = 0,
+  Function = 1,
+  Local = 2,
 }
 
 enum ExternalKind {
@@ -345,30 +350,53 @@ interface TypeInfo {
   importTypeIndices: number[];
   funcTypeIndices: number[];
   funcRemap: number[];
+  funcNameBB: ByteBuffer;
 }
 
 function buildTypeInfo(code: Code): TypeInfo {
+  const funcNameBB = new ByteBuffer;
   const info: TypeInfo = {
     typeMap: new Map<string, number>(),
     types: [],
     importTypeIndices: [],
     funcTypeIndices: [],
     funcRemap: [],
+    funcNameBB,
   };
+  let count = 0;
+
+  funcNameBB.writeVarU(code.imports.length + code.funcs.length);
 
   for (const func of code.imports) {
+    const name = encodeASCII(func.name);
+    funcNameBB.writeVarU(count);
+    funcNameBB.writeVarU(name.length);
+    funcNameBB.writeBytes(name);
     info.importTypeIndices.push(addFuncType(
       func.argTypes, func.retType, info.typeMap, info.types));
+    count++;
   }
 
-  let count = code.imports.length;
   for (const func of code.funcs) {
-    info.funcRemap.push(count++);
+    const name = encodeASCII(func.name);
+    funcNameBB.writeVarU(count);
+    funcNameBB.writeVarU(name.length);
+    funcNameBB.writeBytes(name);
+    info.funcRemap.push(count);
     info.funcTypeIndices.push(addFuncType(
       func.argTypes, func.retType, info.typeMap, info.types));
+    count++;
   }
 
   return info;
+}
+
+function encodeASCII(text: string): Uint8Array {
+  const bb = new ByteBuffer;
+  for (let i = 0; i < text.length; i++) {
+    bb.writeByte(text.charCodeAt(i));
+  }
+  return bb.finish();
 }
 
 export function allocateGlobals(code: Code): {initializer: Uint8Array, globalOffsets: number[]} {
@@ -421,8 +449,8 @@ export function encodeWASM(code: Code): Uint8Array {
   for (let i = 0; i < code.imports.length; i++) {
     const name = code.imports[i].name;
     const dot = name.indexOf('.');
-    const moduleName = new Buffer(dot !== -1 ? name.slice(0, dot) : 'imports');
-    const fieldName = new Buffer(dot !== -1 ? name.slice(dot + 1) : name);
+    const moduleName = encodeASCII(dot !== -1 ? name.slice(0, dot) : 'imports');
+    const fieldName = encodeASCII(dot !== -1 ? name.slice(dot + 1) : name);
     importBB.writeVarU(moduleName.length);
     importBB.writeBytes(moduleName);
     importBB.writeVarU(fieldName.length);
@@ -464,7 +492,7 @@ export function encodeWASM(code: Code): Uint8Array {
   }
   exportBB.writeVarU(exported.length);
   for (const [i, name] of exported) {
-    const utf8 = new Buffer(name);
+    const utf8 = encodeASCII(name);
     exportBB.writeVarU(utf8.length);
     exportBB.writeBytes(utf8);
     exportBB.writeByte(ExternalKind.Function);
@@ -493,6 +521,15 @@ export function encodeWASM(code: Code): Uint8Array {
   dataBB.writeVarU(initializer.length);
   dataBB.writeBytes(initializer);
   bb.writeSection(Section.Data, dataBB);
+
+  // Write the "name" section
+  const nameBB = new ByteBuffer;
+  nameBB.writeVarU(4);
+  nameBB.writeBytes(encodeASCII('name'));
+  nameBB.writeVarU(NameType.Function);
+  nameBB.writeVarU(typeInfo.funcNameBB.length);
+  nameBB.writeBytes(typeInfo.funcNameBB.finish());
+  bb.writeSection(Section.Custom, nameBB);
 
   return bb.finish();
 }
@@ -1082,7 +1119,6 @@ function encodeFunc(info: EncodeInfo, bb: ByteBuffer): void {
 
   // Write the function body
   const remap = finishLocals(locals, bb);
-  console.log(`func ${func.name}:`);
   for (const opArg of stream) {
     bb.writeByte(opArg.op);
 
@@ -1092,7 +1128,6 @@ function encodeFunc(info: EncodeInfo, bb: ByteBuffer): void {
         case Opcode.SetLocal:
         case Opcode.TeeLocal:
           bb.writeVarU(remap[opArg.arg]);
-          console.log(`  ${Opcode[opArg.op]} ${remap[opArg.arg]}`);
           break;
 
         case Opcode.I32Const:
@@ -1101,7 +1136,6 @@ function encodeFunc(info: EncodeInfo, bb: ByteBuffer): void {
         case Opcode.Loop:
         case Opcode.Block:
           bb.writeVarS(opArg.arg);
-          console.log(`  ${Opcode[opArg.op]} ${opArg.arg}`);
           break;
 
         case Opcode.I32Load8S:
@@ -1112,7 +1146,6 @@ function encodeFunc(info: EncodeInfo, bb: ByteBuffer): void {
         case Opcode.I64Store8:
           bb.writeVarU(0); // Align to 1 byte
           bb.writeVarU(opArg.arg);
-          console.log(`  ${Opcode[opArg.op]} ${opArg.arg}`);
           break;
 
         case Opcode.I32Load16S:
@@ -1123,7 +1156,6 @@ function encodeFunc(info: EncodeInfo, bb: ByteBuffer): void {
         case Opcode.I64Store16:
           bb.writeVarU(1); // Align to 2 bytes
           bb.writeVarU(opArg.arg);
-          console.log(`  ${Opcode[opArg.op]} ${opArg.arg}`);
           break;
 
         case Opcode.I32Load:
@@ -1133,23 +1165,18 @@ function encodeFunc(info: EncodeInfo, bb: ByteBuffer): void {
         case Opcode.I64Store32:
           bb.writeVarU(2); // Align to 4 bytes
           bb.writeVarU(opArg.arg);
-          console.log(`  ${Opcode[opArg.op]} ${opArg.arg}`);
           break;
 
         case Opcode.I64Load:
         case Opcode.I64Store:
           bb.writeVarU(3); // Align to 8 bytes
           bb.writeVarU(opArg.arg);
-          console.log(`  ${Opcode[opArg.op]} ${opArg.arg}`);
           break;
 
         default:
           bb.writeVarU(opArg.arg);
-          console.log(`  ${Opcode[opArg.op]} ${opArg.arg}`);
           break;
       }
-    } else {
-      console.log(`  ${Opcode[opArg.op]}`);
     }
   }
 

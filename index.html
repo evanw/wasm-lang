@@ -1,0 +1,68 @@
+<meta charset="UTF-8">
+<style>
+  body {
+    font-family: sans-serif;
+    margin: 40px;
+  }
+  textarea {
+    font-family: monospace;
+    width: 100%;
+    height: 500px;
+  }
+  table {
+    width: 100%;
+  }
+</style>
+<script src="compiled.js"></script>
+<script src="libwabt.js"></script>
+<table>
+  <tr>
+    <td>
+      <h2>Input</h2>
+      <textarea id="stdin" autofocus>type List {
+  Empty
+  Link(head int, tail List)
+}
+
+@export("main")
+def main() List {
+  var list = Empty
+  var i = 0
+
+  while i &lt; 10 {
+    list = Link(i, list)
+    i = i + 1
+  }
+
+  return list
+}
+</textarea>
+    </td>
+    <td>
+      <h2>Output</h2>
+      <textarea id="stdout" readonly></textarea>
+    </td>
+  </tr>
+</table>
+<p><button id="run">Run</button></p>
+<script>
+  stdin.oninput = () => {
+    const {log, wasm} = Compiler.run(stdin.value);
+    if (log) {
+      stdout.value = log;
+      run.onclick = null;
+      run.disabled = true;
+    } else {
+      const module = wabt.readWasm(wasm, {readDebugNames: true});
+      module.generateNames();
+      module.applyNames();
+      stdout.value = module.toText({foldExprs: true, inlineExport: true});
+      run.onclick = async () => {
+        const {instance} = await WebAssembly.instantiate(wasm);
+        stdout.value = 'main(): ' + instance.exports.main();
+      };
+      run.disabled = false;
+    }
+  };
+  stdin.oninput();
+</script>

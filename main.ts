@@ -4,10 +4,6 @@ import { RawType, codeToString } from './ssa';
 import { compile } from './compiler';
 import { encodeWASM } from './wasm';
 
-declare function require(name: string): any;
-declare const WebAssembly: any;
-declare const __dirname: string;
-
 const library = `
 type int
 type bool
@@ -48,38 +44,25 @@ def _malloc(size int) int {
 }
 `;
 
-export async function main(): Promise<void> {
-  const sourceNames = ['(library)', require('path').join(__dirname, 'example.txt')];
-  const sources = [library, require('fs').readFileSync('example.txt', 'utf8')];
+export function run(input: string): {log: string, wasm: Uint8Array | null} {
+  const sourceNames = ['<stdin>', '<library>'];
+  const sources = [input, library];
   const log: Log = {messages: []};
-  const parsed: Parsed = {sourceNames, types: [], defs: [], vars: []};
-  const wasParsed = sources.every((source, i) => parse(log, source, i, parsed));
-  const code = wasParsed ? compile(log, parsed, RawType.I32) : null;
-  (Error as any).stackTraceLimit = Infinity;
+  const parsed: Parsed = {librarySource: 1, sourceNames, types: [], defs: [], vars: []};
+
+  for (let i = 0; i < sources.length; i++) {
+    parse(log, sources[i], i, parsed);
+  }
 
   if (log.messages.length > 0) {
-    console.log(logToString(log, sourceNames, sources));
-  } else if (code !== null) {
-    console.log(codeToString(code));
-    const wasm = encodeWASM(code);
-    require('fs').writeFileSync('example.wasm', wasm);
-
-    const {instance} = await WebAssembly.instantiate(wasm, {imports: {
-      add: (a: number, b: number) => a + b,
-    }});
-    console.log(instance);
-
-    const start = Date.now();
-    console.log(instance.exports.fib(34));
-    console.log('5702887');
-    const end = Date.now();
-    console.log('time:', ((end - start) / 1000).toFixed(3) + 's');
-
-    console.log(instance.exports.main());
-    console.log(instance.exports.add(1, 2));
-  } else {
-    console.log('done');
+    return {log: logToString(log, sourceNames, sources), wasm: null};
   }
-}
 
-main().catch(e => setTimeout(() => { throw e; }, 0));
+  const code = compile(log, parsed, RawType.I32);
+
+  if (log.messages.length > 0) {
+    return {log: logToString(log, sourceNames, sources), wasm: null};
+  }
+
+  return {log: '', wasm: encodeWASM(code)};
+}
