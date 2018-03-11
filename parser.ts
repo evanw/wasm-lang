@@ -123,7 +123,13 @@ export type ExprKind =
   {kind: 'Binary', op: BinOp, left: Expr, right: Expr} |
   {kind: 'Call', name: string, nameRange: Range, args: Expr[]} |
   {kind: 'Dot', target: Expr, name: string, nameRange: Range} |
-  {kind: 'Index', target: Expr, value: Expr};
+  {kind: 'Index', target: Expr, value: Expr} |
+  {kind: 'Match', name: string, nameRange: Range, args: Pattern[], value: Expr};
+
+export interface Pattern {
+  range: Range;
+  name: string;
+}
 
 export interface TypeExpr {
   range: Range;
@@ -542,9 +548,43 @@ function parseArgs(lexer: Lexer): ArgDecl[] | null {
   return args;
 }
 
+function parseMatchOrExpr(lexer: Lexer): Expr | null {
+  const start = lexer.start;
+
+  if (!eat(lexer, Token.Var)) {
+    return parseExpr(lexer, LEVEL_LOWEST);
+  }
+
+  const name = currentText(lexer);
+  const nameRange = currentRange(lexer);
+  if (!expect(lexer, Token.Identifier)) return null;
+  return parseMatch(lexer, start, name, nameRange);
+}
+
+function parseMatch(lexer: Lexer, start: number, name: string, nameRange: Range): Expr | null {
+  if (!expect(lexer, Token.OpenParenthesis)) return null;
+  eat(lexer, Token.Newline);
+
+  const args: Pattern[] = [];
+  while (lexer.token !== Token.CloseParenthesis) {
+    const start = lexer.start;
+    const name = currentText(lexer);
+    const range = currentRange(lexer);
+    if (!expect(lexer, Token.Identifier)) return null;
+    args.push({range, name});
+    if (!eat(lexer, Token.Comma)) break;
+    eat(lexer, Token.Newline);
+  }
+
+  eat(lexer, Token.Newline);
+  if (!expect(lexer, Token.CloseParenthesis) || !expect(lexer, Token.Equals)) return null;
+  const value = parseExpr(lexer, LEVEL_LOWEST);
+  if (value === null) return null;
+  return {range: spanSince(lexer, start), kind: {kind: 'Match', name, nameRange, args, value}};
+}
+
 function parseStmts(lexer: Lexer, enclosingLoopCount: number): Stmt[] | null {
   const stmts: Stmt[] = [];
-  if (!expect(lexer, Token.OpenBrace)) return null;
   eat(lexer, Token.Newline);
 
   while (lexer.token! !== Token.CloseBrace) {
@@ -556,13 +596,23 @@ function parseStmts(lexer: Lexer, enclosingLoopCount: number): Stmt[] | null {
         const name = currentText(lexer);
         const nameRange = currentRange(lexer);
         if (!expect(lexer, Token.Identifier)) return null;
-        const type: TypeExpr | null = lexer.token === Token.Equals
-          ? {range: currentRange(lexer), kind: {kind: 'Inferred'}}
-          : parseType(lexer);
-        if (type === null || !expect(lexer, Token.Equals)) return null;
-        const value = parseExpr(lexer, LEVEL_LOWEST);
-        if (value === null) return null;
-        stmts.push({range: spanSince(lexer, start), kind: {kind: 'Var', name, nameRange, type, value}});
+        if (lexer.token === Token.OpenParenthesis) {
+          const test = parseMatch(lexer, start, name, nameRange);
+          if (test === null || !expect(lexer, Token.Else)) return null;
+          const no = parseBlock(lexer, enclosingLoopCount);
+          if (no === null) return null;
+          const yes = parseStmts(lexer, enclosingLoopCount);
+          if (yes === null) return null;
+          stmts.push({range: spanSince(lexer, start), kind: {kind: 'If', test, yes, no}});
+        } else {
+          const type: TypeExpr | null = lexer.token === Token.Equals
+            ? {range: currentRange(lexer), kind: {kind: 'Inferred'}}
+            : parseType(lexer);
+          if (type === null || !expect(lexer, Token.Equals)) return null;
+          const value = parseExpr(lexer, LEVEL_LOWEST);
+          if (value === null) return null;
+          stmts.push({range: spanSince(lexer, start), kind: {kind: 'Var', name, nameRange, type, value}});
+        }
         break;
       }
 
@@ -592,9 +642,9 @@ function parseStmts(lexer: Lexer, enclosingLoopCount: number): Stmt[] | null {
 
       case Token.While: {
         advance(lexer);
-        const test = parseExpr(lexer, LEVEL_LOWEST);
+        const test = parseMatchOrExpr(lexer);
         if (test === null) return null;
-        const body = parseStmts(lexer, enclosingLoopCount + 1);
+        const body = parseBlock(lexer, enclosingLoopCount + 1);
         if (body === null) return null;
         stmts.push({range: spanSince(lexer, start), kind: {kind: 'While', test, body}});
         break;
@@ -602,11 +652,11 @@ function parseStmts(lexer: Lexer, enclosingLoopCount: number): Stmt[] | null {
 
       case Token.If: {
         advance(lexer);
-        const test = parseExpr(lexer, LEVEL_LOWEST);
+        const test = parseMatchOrExpr(lexer);
         if (test === null) return null;
-        const yes = parseStmts(lexer, enclosingLoopCount);
+        const yes = parseBlock(lexer, enclosingLoopCount);
         if (yes === null) return null;
-        const no = eat(lexer, Token.Else) ? parseStmts(lexer, enclosingLoopCount) : [];
+        const no = eat(lexer, Token.Else) ? parseBlock(lexer, enclosingLoopCount) : [];
         if (no === null) return null;
         stmts.push({range: spanSince(lexer, start), kind: {kind: 'If', test, yes, no}});
         break;
@@ -635,7 +685,13 @@ function parseStmts(lexer: Lexer, enclosingLoopCount: number): Stmt[] | null {
     if (!eat(lexer, Token.Newline)) break;
   }
 
-  if (!expect(lexer, Token.CloseBrace)) return null;
+  return stmts;
+}
+
+function parseBlock(lexer: Lexer, enclosingLoopCount: number): Stmt[] | null {
+  if (!expect(lexer, Token.OpenBrace)) return null;
+  const stmts = parseStmts(lexer, enclosingLoopCount);
+  if (stmts === null || !expect(lexer, Token.CloseBrace)) return null;
   return stmts;
 }
 
@@ -754,7 +810,7 @@ export function parse(log: Log, text: string, source: number, parsed: Parsed): b
         if (ret === null) return false;
         let body: Stmt[] | null = null;
         if (lexer.token === Token.OpenBrace) {
-          body = parseStmts(lexer, 0);
+          body = parseBlock(lexer, 0);
           if (body === null) return false;
         }
         parsed.defs.push({range: spanSince(lexer, start), name, nameRange, tags, params, args, ret, body});

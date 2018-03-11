@@ -1,5 +1,5 @@
 import { Log, Range, appendToLog } from './log';
-import { Parsed, TypeExpr, CtorDecl, DefDecl, Stmt, Expr, BinOp, UnOp, Tag } from './parser';
+import { Parsed, TypeExpr, CtorDecl, DefDecl, Stmt, Expr, BinOp, UnOp, Tag, Pattern } from './parser';
 import {
   addIns,
   addLocalGet,
@@ -317,6 +317,10 @@ interface Scope {
   locals: Map<string, Local>;
 }
 
+function createScope(parent: Scope | null): Scope {
+  return {parent, locals: new Map};
+}
+
 function getFirstTag(context: Context, tags: Tag[]): Tag | null {
   if (tags.length === 0) {
     return null;
@@ -448,7 +452,7 @@ function compileDefs(context: Context, parsed: Parsed): void {
     }
 
     const func = context.code.funcs[data.kind.index];
-    const scope: Scope = {parent: null, locals: new Map()};
+    const scope = createScope(null);
 
     // Add a local variable for each argument
     for (let i = 0; i < def.args.length; i++) {
@@ -475,8 +479,70 @@ function compileDefs(context: Context, parsed: Parsed): void {
   }
 }
 
+function compileMatchOrExpr(context: Context, func: Func, scope: Scope, test: Expr, trueBlock: number): Result {
+  if (test.kind.kind !== 'Match') {
+    return compileExpr(context, test, func, scope, context.boolTypeID);
+  }
+  const {name, nameRange, args} = test.kind;
+
+  // Check for a local first
+  const local = findLocal(scope, name);
+  if (local !== null) {
+    appendToLog(context.log, nameRange, `The name "${name}" is not a constructor`);
+    return errorResult(context, func);
+  }
+
+  // Check for a global next
+  let global = findGlobal(context.globalScope, nameRange.source, name);
+  if (global === null) {
+    appendToLog(context.log, nameRange, `There is no symbol named "${name}" here`);
+    return errorResult(context, func);
+  }
+  global = forwardToDefaultCtor(context, global);
+  if (global.kind !== 'Ctor') {
+    appendToLog(context.log, nameRange, `The name "${name}" is not a constructor ${global.kind}`);
+    return errorResult(context, func);
+  }
+
+  // The type must have a tag
+  const type = context.types[global.typeID.index];
+  if (type.tagOffset === null) {
+    appendToLog(context.log, nameRange, `Cannot match on type "${name}"`);
+    return errorResult(context, func);
+  }
+
+  // Check for tag equality
+  const result = compileExpr(context, test.kind.value, func, scope, global.typeID);
+  const tag = addMemGet(func, context.currentBlock, result.value, type.tagOffset, 4);
+  const equals = addIns(func, context.currentBlock, {kind: 'Eq32', left: tag.ref, right: createConstant(func, global.index).ref});
+
+  // The match must have the same number of fields
+  const ctor = type.ctors[global.index];
+  if (ctor.args.length !== args.length) {
+    const expected = ctor.args.length === 1 ? '' : 's';
+    const found = args.length === 1 ? '' : 's';
+    appendToLog(context.log, test.range, `Expected ${ctor.args.length} argument${expected} but found ${args.length} argument${found}`);
+    return errorResult(context, func);
+  }
+
+  // If the tag matches, initialize local variables
+  for (let i = 0; i < args.length; i++) {
+    const pattern = args[i];
+    const arg = ctor.args[i];
+    const local = defineLocal(context, func, scope, pattern.name, pattern.range, arg.typeID);
+    const value = addMemGet(func, trueBlock, result.value,
+      ctor.fieldOffsets[i], context.types[arg.typeID.index].fieldSize);
+    addLocalSet(func, trueBlock, local, value);
+}
+
+  return {
+    typeID: context.boolTypeID,
+    value: equals,
+  };
+}
+
 function compileStmts(context: Context, stmts: Stmt[], func: Func, parent: Scope, retTypeID: TypeID): void {
-  const scope: Scope = {parent, locals: new Map()};
+  const scope = createScope(parent);
 
   for (const stmt of stmts) {
     switch (stmt.kind.kind) {
@@ -558,43 +624,43 @@ function compileStmts(context: Context, stmts: Stmt[], func: Func, parent: Scope
       }
 
       case 'If': {
-        // Compile the test
-        const test = compileExpr(context, stmt.kind.test, func, scope, context.boolTypeID);
+        const thenBlock = createBlock(func);
+        const thenScope = createScope(scope);
+        const test = compileMatchOrExpr(context, func, thenScope, stmt.kind.test, thenBlock);
         const parent = context.currentBlock;
-        const yes = createBlock(func);
 
         // Without an else
         if (stmt.kind.no.length === 0) {
           setJump(func, parent, {
             kind: 'Branch',
             value: test.value.ref,
-            yes: {kind: 'Child', index: yes},
+            yes: {kind: 'Child', index: thenBlock},
             no: {kind: 'Next', parent},
           });
 
           // Then branch
-          context.currentBlock = yes;
-          compileStmts(context, stmt.kind.yes, func, scope, retTypeID);
+          context.currentBlock = thenBlock;
+          compileStmts(context, stmt.kind.yes, func, thenScope, retTypeID);
           setJump(func, context.currentBlock, {kind: 'Goto', target: {kind: 'Next', parent}});
         }
 
         // With an else
         else {
-          const no = createBlock(func);
+          const noBlock = createBlock(func);
           setJump(func, parent, {
             kind: 'Branch',
             value: test.value.ref,
-            yes: {kind: 'Child', index: yes},
-            no: {kind: 'Child', index: no},
+            yes: {kind: 'Child', index: thenBlock},
+            no: {kind: 'Child', index: noBlock},
           });
 
           // Then branch
-          context.currentBlock = yes;
-          compileStmts(context, stmt.kind.yes, func, scope, retTypeID);
+          context.currentBlock = thenBlock;
+          compileStmts(context, stmt.kind.yes, func, thenScope, retTypeID);
           setJump(func, context.currentBlock, {kind: 'Goto', target: {kind: 'Next', parent}});
 
           // Else branch
-          context.currentBlock = no;
+          context.currentBlock = noBlock;
           compileStmts(context, stmt.kind.no, func, scope, retTypeID);
           setJump(func, context.currentBlock, {kind: 'Goto', target: {kind: 'Next', parent}});
         }
@@ -619,10 +685,12 @@ function compileStmts(context: Context, stmts: Stmt[], func: Func, parent: Scope
 
         // Compile the test (special-case "while true" for "return" statement checking)
         const testExpr = stmt.kind.test;
+        const body = createBlock(func);
+        const bodyScope = createScope(scope);
         if (testExpr.kind.kind === 'Bool' && testExpr.kind.value === true) {
           setJump(func, header, {kind: 'Goto', target: {kind: 'Next', parent: header}});
         } else {
-          const test = compileExpr(context, stmt.kind.test, func, scope, context.boolTypeID);
+          const test = compileMatchOrExpr(context, func, bodyScope, stmt.kind.test, body);
           setJump(func, context.currentBlock, {
             kind: 'Branch',
             value: test.value.ref,
@@ -632,11 +700,10 @@ function compileStmts(context: Context, stmts: Stmt[], func: Func, parent: Scope
         }
 
         // Compile the body
-        const body = createBlock(func);
         setNext(func, context.currentBlock, body);
         context.currentBlock = body;
         context.loops.push(loop);
-        compileStmts(context, stmt.kind.body, func, scope, retTypeID);
+        compileStmts(context, stmt.kind.body, func, bodyScope, retTypeID);
         context.loops.pop();
         setJump(func, context.currentBlock, {kind: 'Goto', target: {kind: 'Loop', parent: loop}});
 
@@ -671,8 +738,7 @@ function compileStmts(context: Context, stmts: Stmt[], func: Func, parent: Scope
             const ptr = addIns(func, context.currentBlock, {kind: 'PtrGlobal', index: data.index});
             const size = context.types[data.typeID.index].fieldSize;
             const result = compileExpr(context, stmt.kind.value, func, scope, data.typeID);
-            addMemSet(func, context.currentBlock, ptr.ref, 0, size,
-              unwrapRef(func, context.currentBlock, result.value));
+            addMemSet(func, context.currentBlock, ptr, 0, size, result.value);
           } else {
             appendToLog(context.log, target.range, `Cannot use the name "${name}" as a value`);
           }
@@ -783,20 +849,19 @@ function allocType(context: Context, func: Func, type: TypeData, ctorIndex: numb
 
   // Initialize the reference count to 1
   if (type.hasRefCount) {
-    addMemSet(func, context.currentBlock, ptr.ref, 0, 4, createConstant(func, 1).ref);
+    addMemSet(func, context.currentBlock, ptr, 0, 4, createConstant(func, 1));
   }
 
   // Tag the allocation with the constructor that initialized it
   if (type.tagOffset !== null) {
-    addMemSet(func, context.currentBlock, ptr.ref, type.tagOffset, 4, createConstant(func, ctorIndex).ref);
+    addMemSet(func, context.currentBlock, ptr, type.tagOffset, 4, createConstant(func, ctorIndex));
   }
 
   // Initialize each field
   const ctor = type.ctors[ctorIndex];
   for (let i = 0; i < args.length; i++) {
     const size = context.types[ctor.args[i].typeID.index].fieldSize;
-    const arg = unwrapRef(func, context.currentBlock, args[i].value);
-    addMemSet(func, context.currentBlock, ptr.ref, ctor.fieldOffsets[i], size, arg);
+    addMemSet(func, context.currentBlock, ptr, ctor.fieldOffsets[i], size, args[i].value);
   }
 
   return ptr;
@@ -855,7 +920,7 @@ function compileExpr(context: Context, expr: Expr, func: Func, scope: Scope, cas
           const size = context.types[data.typeID.index].fieldSize;
           result = {
             typeID: data.typeID,
-            value: addMemGet(func, context.currentBlock, ptr.ref, 0, size),
+            value: addMemGet(func, context.currentBlock, ptr, 0, size),
           };
         } else {
           appendToLog(context.log, expr.range, `Cannot use the name "${name}" as a value`);
@@ -1049,7 +1114,7 @@ function compileExpr(context: Context, expr: Expr, func: Func, scope: Scope, cas
               found = true;
               result = {
                 typeID: arg.typeID,
-                value: addMemGet(func, context.currentBlock, unwrapRef(func, context.currentBlock, target.value),
+                value: addMemGet(func, context.currentBlock, target.value,
                   ctorData.fieldOffsets[i], context.types[arg.typeID.index].fieldSize),
               };
               break;
@@ -1072,6 +1137,7 @@ function compileExpr(context: Context, expr: Expr, func: Func, scope: Scope, cas
       break;
 
     case 'Key':
+    case 'Match':
       throw new Error('Internal error');
 
     default: {

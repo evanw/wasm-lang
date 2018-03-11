@@ -25,16 +25,22 @@
 }
 
 @export("main")
-def main() List {
+def main() int {
   var list = Empty
-  var i = 0
 
+  var i = 0
   while i &lt; 10 {
     list = Link(i, list)
     i = i + 1
   }
 
-  return list
+  var total = 0
+  while var Link(hd, tl) = list {
+    total = total + hd
+    list = tl
+  }
+
+  return total
 }
 </textarea>
     </td>

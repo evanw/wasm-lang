@@ -236,7 +236,8 @@ export function addIns(func: Func, block: number, ins: Ins): ValueRef {
   return {block, ref: {index}};
 }
 
-export function addMemGet(func: Func, block: number, ptr: InsRef, offset: number, size: number): ValueRef {
+export function addMemGet(func: Func, block: number, addr: ValueRef, offset: number, size: number): ValueRef {
+  const ptr = unwrapRef(func, block, addr);
   switch (size) {
     case 1: return addIns(func, block, {kind: 'MemGet8', ptr, offset});
     case 4: return addIns(func, block, {kind: 'MemGet32', ptr, offset});
@@ -244,7 +245,9 @@ export function addMemGet(func: Func, block: number, ptr: InsRef, offset: number
   }
 }
 
-export function addMemSet(func: Func, block: number, ptr: InsRef, offset: number, size: number, value: InsRef): void {
+export function addMemSet(func: Func, block: number, addr: ValueRef, offset: number, size: number, ref: ValueRef): void {
+  const ptr = unwrapRef(func, block, addr);
+  const value = unwrapRef(func, block, ref);
   switch (size) {
     case 1: addIns(func, block, {kind: 'MemSet8', ptr, offset, value}); break;
     case 4: addIns(func, block, {kind: 'MemSet32', ptr, offset, value}); break;
