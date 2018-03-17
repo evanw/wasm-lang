@@ -533,7 +533,7 @@ function compileMatchOrExpr(context: Context, func: Func, scope: Scope, test: Ex
     const value = addMemGet(func, trueBlock, result.value,
       ctor.fieldOffsets[i], context.types[arg.typeID.index].fieldSize);
     addLocalSet(func, trueBlock, local, value);
-}
+  }
 
   return {
     typeID: context.boolTypeID,

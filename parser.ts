@@ -578,6 +578,7 @@ function parseMatch(lexer: Lexer, start: number, name: string, nameRange: Range)
 
   eat(lexer, Token.Newline);
   if (!expect(lexer, Token.CloseParenthesis) || !expect(lexer, Token.Equals)) return null;
+  eat(lexer, Token.Newline);
   const value = parseExpr(lexer, LEVEL_LOWEST);
   if (value === null) return null;
   return {range: spanSince(lexer, start), kind: {kind: 'Match', name, nameRange, args, value}};
@@ -634,6 +635,7 @@ function parseStmts(lexer: Lexer, enclosingLoopCount: number): Stmt[] | null {
             ? {range: currentRange(lexer), kind: {kind: 'Inferred'}}
             : parseType(lexer);
           if (type === null || !expect(lexer, Token.Equals)) return null;
+          eat(lexer, Token.Newline);
           const value = parseExpr(lexer, LEVEL_LOWEST);
           if (value === null) return null;
           stmts.push({range: spanSince(lexer, start), kind: {kind: 'Var', name, nameRange, type, value}});
@@ -687,6 +689,7 @@ function parseStmts(lexer: Lexer, enclosingLoopCount: number): Stmt[] | null {
         const value = parseExpr(lexer, LEVEL_LOWEST);
         if (value === null) return null;
         if (eat(lexer, Token.Equals)) {
+          eat(lexer, Token.Newline);
           const right = parseExpr(lexer, LEVEL_LOWEST);
           if (right === null) return null;
           stmts.push({range: spanSince(lexer, start), kind: {kind: 'Assign', target: value, value: right}});
@@ -803,6 +806,7 @@ export function parse(log: Log, text: string, source: number, parsed: Parsed): b
           ? {range: currentRange(lexer), kind: {kind: 'Inferred'}}
           : parseType(lexer);
         if (type === null || !expect(lexer, Token.Equals)) return false;
+        eat(lexer, Token.Newline);
         const value = parseExpr(lexer, LEVEL_LOWEST);
         if (value === null) return false;
         parsed.vars.push({range: spanSince(lexer, start), name, nameRange, tags, type, value});
