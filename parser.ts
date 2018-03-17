@@ -124,6 +124,7 @@ export type ExprKind =
   {kind: 'Call', name: string, nameRange: Range, args: Expr[]} |
   {kind: 'Dot', target: Expr, name: string, nameRange: Range} |
   {kind: 'Index', target: Expr, value: Expr} |
+  {kind: 'Branch', test: Expr, yes: Expr, no: Expr} |
   {kind: 'Match', name: string, nameRange: Range, args: Pattern[], value: Expr};
 
 export interface Pattern {
@@ -346,17 +347,18 @@ function parsePrefix(lexer: Lexer): Expr | null {
 }
 
 const LEVEL_LOWEST = 0;
-const LEVEL_OR = 1;
-const LEVEL_AND = 2;
-const LEVEL_BIT_OR = 3;
-const LEVEL_BIT_XOR = 4;
-const LEVEL_BIT_AND = 5;
-const LEVEL_EQUALITY = 6;
-const LEVEL_COMPARE = 7;
-const LEVEL_SHIFT = 8;
-const LEVEL_ADD = 9;
-const LEVEL_MULTIPLY = 10;
-const LEVEL_PREFIX = 11;
+const LEVEL_BRANCH = 1;
+const LEVEL_OR = 2;
+const LEVEL_AND = 3;
+const LEVEL_BIT_OR = 4;
+const LEVEL_BIT_XOR = 5;
+const LEVEL_BIT_AND = 6;
+const LEVEL_EQUALITY = 7;
+const LEVEL_COMPARE = 8;
+const LEVEL_SHIFT = 9;
+const LEVEL_ADD = 10;
+const LEVEL_MULTIPLY = 11;
+const LEVEL_PREFIX = 12;
 
 function parseBinary(lexer: Lexer, left: Expr, op: BinOp, level: number): Expr | null {
   advance(lexer);
@@ -490,6 +492,17 @@ function parseExpr(lexer: Lexer, level: number): Expr | null {
         const value = parseExpr(lexer, LEVEL_LOWEST);
         if (value === null || !expect(lexer, Token.CloseBracket)) return null;
         left = {range: spanSince(lexer, start), kind: {kind: 'Index', target: left, value}};
+        break;
+      }
+
+      case Token.QuestionMark: {
+        if (level >= LEVEL_BRANCH) return left;
+        advance(lexer);
+        const yes = parseExpr(lexer, LEVEL_LOWEST);
+        if (yes === null || !expect(lexer, Token.Colon)) return null;
+        const no = parseExpr(lexer, LEVEL_LOWEST);
+        if (no === null) return null;
+        left = {range: spanSince(lexer, start), kind: {kind: 'Branch', test: left, yes, no}};
         break;
       }
 

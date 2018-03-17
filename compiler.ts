@@ -337,13 +337,13 @@ function getFirstTag(context: Context, tags: Tag[]): Tag | null {
 
 function getStringArg(context: Context, tag: Tag): string | null {
   if (tag.args.length !== 1) {
-    appendToLog(context.log, tag.range, `The "@intrinsic" tag takes one argument`);
+    appendToLog(context.log, tag.range, `The "@${tag.name}" tag takes one argument`);
     return null;
   }
 
   const arg = tag.args[0];
   if (arg.kind.kind !== 'String') {
-    appendToLog(context.log, arg.range, `The "@intrinsic" argument must be a string`);
+    appendToLog(context.log, arg.range, `The "@${tag.name}" argument must be a string`);
     return null;
   }
 
@@ -646,12 +646,12 @@ function compileStmts(context: Context, stmts: Stmt[], func: Func, parent: Scope
 
         // With an else
         else {
-          const noBlock = createBlock(func);
+          const elseBlock = createBlock(func);
           setJump(func, parent, {
             kind: 'Branch',
             value: test.value.ref,
             yes: {kind: 'Child', index: thenBlock},
-            no: {kind: 'Child', index: noBlock},
+            no: {kind: 'Child', index: elseBlock},
           });
 
           // Then branch
@@ -660,7 +660,7 @@ function compileStmts(context: Context, stmts: Stmt[], func: Func, parent: Scope
           setJump(func, context.currentBlock, {kind: 'Goto', target: {kind: 'Next', parent}});
 
           // Else branch
-          context.currentBlock = noBlock;
+          context.currentBlock = elseBlock;
           compileStmts(context, stmt.kind.no, func, scope, retTypeID);
           setJump(func, context.currentBlock, {kind: 'Goto', target: {kind: 'Next', parent}});
         }
@@ -1124,6 +1124,48 @@ function compileExpr(context: Context, expr: Expr, func: Func, scope: Scope, cas
             appendToLog(context.log, expr.kind.nameRange, `There is no field named "${name}" on type "${type.name}"`);
           }
         }
+      }
+      break;
+    }
+
+    case 'Branch': {
+      const test = compileExpr(context, expr.kind.test, func, scope, context.boolTypeID);
+      const parent = context.currentBlock;
+
+      // Then branch
+      const thenBlock = createBlock(func);
+      context.currentBlock = thenBlock;
+      const yes = compileExpr(context, expr.kind.yes, func, scope, null);
+      setJump(func, thenBlock, {kind: 'Goto', target: {kind: 'Next', parent}});
+
+      // Else branch
+      const elseBlock = createBlock(func);
+      context.currentBlock = elseBlock;
+      const no = compileExpr(context, expr.kind.no, func, scope, null);
+      setJump(func, elseBlock, {kind: 'Goto', target: {kind: 'Next', parent}});
+
+      // Merge the control flow for following expressions
+      setJump(func, parent, {
+        kind: 'Branch',
+        value: test.value.ref,
+        yes: {kind: 'Child', index: thenBlock},
+        no: {kind: 'Child', index: elseBlock},
+      });
+      const next = createBlock(func);
+      setNext(func, parent, next);
+      context.currentBlock = next;
+
+      // Merge the data using a local variable
+      if (yes.typeID !== no.typeID) {
+        appendToLog(context.log, expr.range, `Expected branch types "${context.types[yes.typeID.index].name}" and "${context.types[no.typeID.index].name}" to be the same`);
+      } else {
+        const local = createLocal(func, rawTypeForTypeID(context, yes.typeID));
+        addLocalSet(func, thenBlock, local, yes.value);
+        addLocalSet(func, elseBlock, local, no.value);
+        result = {
+          typeID: yes.typeID,
+          value: addLocalGet(func, next, local),
+        };
       }
       break;
     }
