@@ -242,6 +242,9 @@ function parsePrefix(lexer: Lexer): Expr | null {
           case 'n': value = '\n'.charCodeAt(0); break;
           case 'r': value = '\r'.charCodeAt(0); break;
           case 't': value = '\t'.charCodeAt(0); break;
+          case '\\': value = '\\'.charCodeAt(0); break;
+          case '\'': value = '\''.charCodeAt(0); break;
+          case '"': value = '"'.charCodeAt(0); break;
           default: appendToLog(lexer.log, currentRange(lexer), `Invalid escape sequence in character literal`); break;
         }
       } else {
@@ -268,6 +271,9 @@ function parsePrefix(lexer: Lexer): Expr | null {
               case 'n': c = '\n'; break;
               case 'r': c = '\r'; break;
               case 't': c = '\t'; break;
+              case '\\': c = '\\'; break;
+              case '\'': c = '\''; break;
+              case '"': c = '"'; break;
               default: appendToLog(lexer.log, currentRange(lexer), `Invalid escape sequence in string literal`); break;
             }
           } else {
