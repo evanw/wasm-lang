@@ -583,6 +583,31 @@ function parseMatch(lexer: Lexer, start: number, name: string, nameRange: Range)
   return {range: spanSince(lexer, start), kind: {kind: 'Match', name, nameRange, args, value}};
 }
 
+function parseIfChain(lexer: Lexer, enclosingLoopCount: number): {stmt: Stmt, newline: boolean} | null {
+  const start = lexer.start;
+  advance(lexer);
+  const test = parseMatchOrExpr(lexer);
+  if (test === null) return null;
+  const yes = parseBlock(lexer, enclosingLoopCount);
+  if (yes === null) return null;
+  let newline = eat(lexer, Token.Newline);
+  let no: Stmt[] = [];
+  if (eat(lexer, Token.Else)) {
+    if (lexer.token === Token.If) {
+      const chain = parseIfChain(lexer, enclosingLoopCount);
+      if (chain === null) return null;
+      no = [chain.stmt];
+      newline = chain.newline;
+    } else {
+      const block = parseBlock(lexer, enclosingLoopCount);
+      if (block === null) return null;
+      no = block;
+      newline = false;
+    }
+  }
+  return {stmt: {range: spanSince(lexer, start), kind: {kind: 'If', test, yes, no}}, newline};
+}
+
 function parseStmts(lexer: Lexer, enclosingLoopCount: number): Stmt[] | null {
   const stmts: Stmt[] = [];
   eat(lexer, Token.Newline);
@@ -651,14 +676,10 @@ function parseStmts(lexer: Lexer, enclosingLoopCount: number): Stmt[] | null {
       }
 
       case Token.If: {
-        advance(lexer);
-        const test = parseMatchOrExpr(lexer);
-        if (test === null) return null;
-        const yes = parseBlock(lexer, enclosingLoopCount);
-        if (yes === null) return null;
-        const no = eat(lexer, Token.Else) ? parseBlock(lexer, enclosingLoopCount) : [];
-        if (no === null) return null;
-        stmts.push({range: spanSince(lexer, start), kind: {kind: 'If', test, yes, no}});
+        const chain = parseIfChain(lexer, enclosingLoopCount);
+        if (chain === null) return null;
+        stmts.push(chain.stmt);
+        if (chain.newline) continue;
         break;
       }
 
