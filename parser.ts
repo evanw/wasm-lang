@@ -167,6 +167,13 @@ function unexpected(lexer: Lexer): void {
   appendToLog(lexer.log, currentRange(lexer), `Unexpected ${Token[lexer.token]}`);
 }
 
+function skipUnexpectedCommas(lexer: Lexer): void {
+  while (lexer.token === Token.Comma) {
+    unexpected(lexer);
+    advance(lexer);
+  }
+}
+
 function parseTypeSuffix(lexer: Lexer, type: TypeExpr): TypeExpr | null {
   while (true) {
     if (eat(lexer, Token.OpenBracket)) {
@@ -192,6 +199,7 @@ function parseType(lexer: Lexer): TypeExpr | null {
   eat(lexer, Token.Newline);
 
   while (lexer.token !== Token.GreaterThan) {
+    skipUnexpectedCommas(lexer);
     const param = parseType(lexer);
     if (param === null) return null;
     params.push(param);
@@ -329,6 +337,7 @@ function parsePrefix(lexer: Lexer): Expr | null {
       eat(lexer, Token.Newline);
 
       while (lexer.token !== Token.CloseBracket) {
+        skipUnexpectedCommas(lexer);
         const value = parseExpr(lexer, LEVEL_LOWEST);
         if (value === null) return null;
         values.push(value);
@@ -512,6 +521,7 @@ function parseExpr(lexer: Lexer, level: number): Expr | null {
         eat(lexer, Token.Newline);
 
         while (lexer.token !== Token.CloseParenthesis) {
+          skipUnexpectedCommas(lexer);
           const start = lexer.start;
           const isMaybeKey = lexer.token === Token.Identifier;
           let value = parseExpr(lexer, LEVEL_LOWEST);
@@ -550,6 +560,7 @@ function parseArgs(lexer: Lexer): ArgDecl[] | null {
   eat(lexer, Token.Newline);
 
   while (lexer.token !== Token.CloseParenthesis) {
+    skipUnexpectedCommas(lexer);
     const start = lexer.start;
     const name = currentText(lexer);
     const nameRange = currentRange(lexer);
@@ -587,6 +598,7 @@ function parseMatch(lexer: Lexer, start: number, name: string, nameRange: Range)
 
   const args: Pattern[] = [];
   while (lexer.token !== Token.CloseParenthesis) {
+    skipUnexpectedCommas(lexer);
     const start = lexer.start;
     const name = currentText(lexer);
     const range = currentRange(lexer);
@@ -769,6 +781,7 @@ function parseParams(lexer: Lexer): ParamDecl[] | null {
   eat(lexer, Token.Newline);
 
   while (lexer.token !== Token.GreaterThan) {
+    skipUnexpectedCommas(lexer);
     const start = lexer.start;
     const name = currentText(lexer);
     if (!expect(lexer, Token.Identifier)) return null;
@@ -803,6 +816,7 @@ export function parse(log: Log, text: string, source: number, parsed: Parsed): b
           eat(lexer, Token.Newline);
 
           while (lexer.token !== Token.CloseBracket) {
+            skipUnexpectedCommas(lexer);
             const arg = parseExpr(lexer, LEVEL_LOWEST);
             if (arg === null) return false;
             args.push(arg);
