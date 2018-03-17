@@ -354,6 +354,7 @@ const LEVEL_PREFIX = 11;
 
 function parseBinary(lexer: Lexer, left: Expr, op: BinOp, level: number): Expr | null {
   advance(lexer);
+  eat(lexer, Token.Newline);
   const right = parseExpr(lexer, level);
   if (right === null) return null;
   return {range: spanSince(lexer, left.range.start), kind: {kind: 'Binary', op, left, right}};
