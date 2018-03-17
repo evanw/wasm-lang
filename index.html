@@ -64,8 +64,17 @@ def main() int {
       module.applyNames();
       stdout.value = module.toText({foldExprs: true, inlineExport: true});
       run.onclick = async () => {
-        const {instance} = await WebAssembly.instantiate(wasm);
-        stdout.value = 'main(): ' + instance.exports.main();
+        const ptrs = new Set;
+        const imports = {
+          afterMalloc(ptr) { ptrs.add(ptr); },
+          afterFree(ptr) { ptrs.delete(ptr); },
+        };
+        try {
+          const {instance} = await WebAssembly.instantiate(wasm, {imports});
+          stdout.value = `main(): ${instance.exports.main()}\nleaks: ${ptrs.size}`;
+        } catch (e) {
+          stdout.value = e;
+        }
       };
       run.disabled = false;
     }
