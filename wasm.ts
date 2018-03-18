@@ -544,6 +544,9 @@ function encodeIns(context: BlockContext, args: InsRef[], ins: Ins): void {
   const opArgs = context.opArgs;
 
   switch (ins.kind) {
+    case 'Nop':
+      break;
+
     case 'PtrGlobal':
       opArgs.push({op: Opcode.I32Const, arg: context.info.globalOffsets[ins.index]});
       break;
@@ -657,8 +660,22 @@ function encodeIns(context: BlockContext, args: InsRef[], ins: Ins): void {
       break;
 
     case 'Retain':
+      opArgs.push({op: Opcode.I32Store, arg: 0});
+      opArgs.push({op: Opcode.I32Add, arg: null});
+      opArgs.push({op: Opcode.I32Const, arg: 1});
+      opArgs.push({op: Opcode.I32Load, arg: 0});
+
+      // This pushes the same argument twice, which could normally break
+      // correctness by causing duplicate code to be emitted. This is prevented
+      // by disabling value inlining for 'Retain' operations in 'visitIns'.
+      args.push(ins.ptr, ins.ptr);
+      break;
+
     case 'Release':
-      throw new Error('Not yet implemented');
+      // Function calls must be remapped because their indices start after any imports
+      opArgs.push({op: Opcode.Call, arg: context.info.typeInfo.funcRemap[ins.dtor]});
+      args.push(ins.ptr);
+      break;
 
     case 'Binary': {
       const {op, left, right} = ins;
@@ -839,16 +856,23 @@ interface BlockContext {
 
 function visitIns(context: BlockContext): void {
   const block = context.info.func.blocks[context.blockIndex];
+  const ins = block.insList[context.insIndex];
   const args: InsRef[] = [];
-  encodeIns(context, args, block.insList[context.insIndex]);
+  encodeIns(context, args, ins);
+
+  // Don't allow inline variables for "Retain" instructions since they need to
+  // use their argument more than once. This would be much more elegant if
+  // WebAssembly had an instruction for duplicating something on the stack
+  // but they decided not to include it.
+  const isInlineAllowed = ins.kind !== 'Retain';
 
   // Encode the args in reverse because we're encoding from the bottom up
   for (let i = args.length - 1; i >= 0; i--) {
-    visitArg(context, args[i]);
+    visitArg(context, args[i], {isInlineAllowed});
   }
 }
 
-function visitArg(context: BlockContext, arg: InsRef): void {
+function visitArg(context: BlockContext, arg: InsRef, {isInlineAllowed}: {isInlineAllowed: boolean}): void {
   const constant = getConstant(context.info.func, arg);
 
   // Is this a constant? If so, add it directly.
@@ -858,7 +882,7 @@ function visitArg(context: BlockContext, arg: InsRef): void {
 
   // If this argument is a single-use value immediately
   // before this instruction, inline that value too
-  else if (context.uses[arg.index] === 1 && arg.index === context.insIndex - 1) {
+  else if (context.uses[arg.index] === 1 && arg.index === context.insIndex - 1 && isInlineAllowed) {
     context.insIndex--;
     visitIns(context);
   }
@@ -951,11 +975,11 @@ function encodeBlockTree(
   // The last instruction may be needed by the jump
   switch (block.jump.kind) {
     case 'Return':
-      visitArg(context, block.jump.value);
+      visitArg(context, block.jump.value, {isInlineAllowed: true});
       break;
 
     case 'Branch':
-      visitArg(context, block.jump.value);
+      visitArg(context, block.jump.value, {isInlineAllowed: true});
       break;
   }
 

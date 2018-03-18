@@ -33,6 +33,8 @@ export enum BinIns {
 }
 
 export type Ins =
+  {kind: 'Nop'} |
+
   {kind: 'Call', index: number, args: InsRef[], retType: RawType} |
   {kind: 'CallImport', index: number, args: InsRef[], retType: RawType} |
   {kind: 'CallIntrinsic', name: string, args: InsRef[], retType: RawType} |
@@ -314,8 +316,18 @@ export function addPtrGlobal(func: Func, block: number, index: number): ValueRef
   return addIns(func, block, {kind: 'PtrGlobal', index});
 }
 
+export function addRetain(func: Func, block: number, ptr: ValueRef): void {
+  addIns(func, block, {kind: 'Retain', ptr: unwrapRef(func, block, ptr)});
+}
+
+export function addRelease(func: Func, block: number, ptr: ValueRef, dtor: number): void {
+  addIns(func, block, {kind: 'Release', ptr: unwrapRef(func, block, ptr), dtor});
+}
+
 export function argsOf(ins: Ins): InsRef[] {
   switch (ins.kind) {
+    case 'Nop': return [];
+
     case 'Call': return ins.args;
     case 'CallImport': return ins.args;
     case 'CallIntrinsic': return ins.args;
@@ -398,24 +410,24 @@ function blockToString(context: ToStringContext, block: BasicBlock, indent: stri
     const ins = block.insList[i];
 
     switch (ins.kind) {
+      case 'Nop':
+        break;
+
       case 'Call': {
-        const args = [context.code.funcs[ins.index].name];
-        for (const arg of ins.args) {
-          args.push(refToString(context.func, arg));
-        }
-        text += `${indent}t${i} = call ${args.join(', ')}\n`;
+        const args = ins.args.map(arg => refToString(context.func, arg));
+        text += `${indent}t${i} = ${context.code.funcs[ins.index].name}(${args.join(', ')})\n`;
         break;
       }
 
       case 'CallImport': {
         const args = ins.args.map(arg => refToString(context.func, arg));
-        text += `${indent}t${i} = ${context.code.imports[ins.index]} ${args.join(', ')}\n`;
+        text += `${indent}t${i} = ${context.code.imports[ins.index].name}(${args.join(', ')})\n`;
         break;
       }
 
       case 'CallIntrinsic': {
         const args = ins.args.map(arg => refToString(context.func, arg));
-        text += `${indent}t${i} = ${ins.name} ${args.join(', ')}\n`;
+        text += `${indent}t${i} = ${ins.name}(${args.join(', ')})\n`;
         break;
       }
 
@@ -436,19 +448,19 @@ function blockToString(context: ToStringContext, block: BasicBlock, indent: stri
         break;
 
       case 'MemGet8':
-        text += `${indent}t${i} = mem.get8 ${refToString(context.func, ins.ptr)}, ${ins.offset}\n`;
+        text += `${indent}t${i} = mem.get8 ${refToString(context.func, ins.ptr)} + ${ins.offset}\n`;
         break;
 
       case 'MemSet8':
-        text += `${indent}t${i} = mem.set8 ${refToString(context.func, ins.ptr)}, ${ins.offset}, ${refToString(context.func, ins.value)}\n`;
+        text += `${indent}t${i} = mem.set8 ${refToString(context.func, ins.ptr)} + ${ins.offset}, ${refToString(context.func, ins.value)}\n`;
         break;
 
       case 'MemGet32':
-        text += `${indent}t${i} = mem.get32 ${refToString(context.func, ins.ptr)}, ${ins.offset}\n`;
+        text += `${indent}t${i} = mem.get32 ${refToString(context.func, ins.ptr)} + ${ins.offset}\n`;
         break;
 
       case 'MemSet32':
-        text += `${indent}t${i} = mem.set32 ${refToString(context.func, ins.ptr)}, ${ins.offset}, ${refToString(context.func, ins.value)}\n`;
+        text += `${indent}t${i} = mem.set32 ${refToString(context.func, ins.ptr)} + ${ins.offset}, ${refToString(context.func, ins.value)}\n`;
         break;
 
       case 'LocalGet':
@@ -639,6 +651,7 @@ export function typeOf(func: Func, block: number, ref: InsRef): RawType {
     case 'LocalGet':
       return func.locals[ins.local];
 
+    case 'Nop':
     case 'MemFree':
     case 'MemSet8':
     case 'MemSet32':

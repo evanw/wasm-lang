@@ -19,6 +19,7 @@
   <tr>
     <td>
       <h2>Input</h2>
+      <p>&nbsp;</p>
       <textarea id="stdin" autofocus>type List {
   Empty
   Link(head int, tail List)
@@ -46,15 +47,24 @@ def main() int {
     </td>
     <td>
       <h2>Output</h2>
+      <p>
+        Display:
+        <label for="displayIR">
+          <input type="radio" name="display" id="displayIR" checked> IR
+        </label>
+        <label for="displayWASM">
+          <input type="radio" name="display" id="displayWASM"> WebAssembly
+        </label>
+      </p>
       <textarea id="stdout" readonly></textarea>
     </td>
   </tr>
 </table>
 <p><button id="run">Run</button></p>
 <script>
-  stdin.oninput = () => {
+  const update = () => {
     try {
-      var {log, wasm} = Compiler.run(stdin.value);
+      var {log, wasm, debug} = Compiler.run(stdin.value);
     } catch (e) {
       log = e.stack;
     }
@@ -63,10 +73,11 @@ def main() int {
       run.onclick = null;
       run.disabled = true;
     } else {
+      const displayIR = document.getElementById('displayIR').checked;
       const module = wabt.readWasm(wasm, {readDebugNames: true});
       module.generateNames();
       module.applyNames();
-      stdout.value = module.toText({foldExprs: true, inlineExport: true});
+      stdout.value = displayIR ? debug : module.toText({foldExprs: true, inlineExport: true});
       run.onclick = async () => {
         const ptrs = new Map;
         const imports = {
@@ -89,5 +100,8 @@ def main() int {
       run.disabled = false;
     }
   };
-  stdin.oninput();
+  document.getElementById('displayIR').onchange = update;
+  document.getElementById('displayWASM').onchange = update;
+  stdin.oninput = update;
+  update();
 </script>

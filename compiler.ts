@@ -27,12 +27,16 @@ import {
   addBinary,
   BinIns,
   addMemAlloc,
+  addMemFree,
   addCall,
   addCallImport,
   addCallIntrinsic,
   addPtrGlobal,
+  addRetain,
+  addRelease,
 } from './ssa';
 import { assert, align } from './util';
+import { optimize } from './optimize';
 
 interface TypeID {
   index: number;
@@ -54,6 +58,7 @@ interface CtorData {
 interface TypeData {
   name: string;
   ctors: CtorData[];
+  dtorIndex: number;
   defaultCtor: number | null;
 
   // This will be false for primitive types
@@ -106,6 +111,15 @@ interface GlobalScope {
   modules: Map<number, Map<string, GlobalRef>>;
 }
 
+type Temporary =
+  {kind: 'Normal', typeID: TypeID, value: ValueRef} |
+  {kind: 'Branch', typeID: TypeID, local: number};
+
+interface Loop {
+  block: number;
+  scope: Scope;
+}
+
 interface Context {
   librarySource: number;
   code: Code;
@@ -118,7 +132,22 @@ interface Context {
 
   // Function-specific temporaries
   currentBlock: number;
-  loops: number[];
+  loops: Loop[];
+  temporaries: Temporary[];
+
+  // This holds the number of nested conditional expressions (e.g. a "?:"
+  // expression) that we're currently in. If greater than 0, any temporaries
+  // currently being tracked must be conditionally released, since there may be
+  // control flow paths in which they were never allocated. This is done by
+  // using a dedicated local for the allocation and setting it to zero before
+  // the first control flow fork.
+  controlFlowExprDepth: number;
+
+  // This is the block index when the current statement was started. If local
+  // variables are needed for the conditional temporary handling described
+  // above, they will be zeroed here because this block dominates all uses of
+  // that temporary.
+  stmtStartBlockIndex: number;
 
   // Built-in types
   errorTypeID: TypeID;
@@ -174,6 +203,7 @@ function addTypeID(context: Context, range: Range, name: string, fieldBytes: num
   context.types.push({
     name,
     ctors: [],
+    dtorIndex: -1,
     defaultCtor: null,
     hasRefCount: true,
     tagOffset: null,
@@ -182,6 +212,71 @@ function addTypeID(context: Context, range: Range, name: string, fieldBytes: num
     allocSize: 1,
   });
   return typeID;
+}
+
+function beforeControlFlowFork(context: Context): void {
+  context.controlFlowExprDepth += 1;
+}
+
+function afterControlFlowFork(context: Context): void {
+  context.controlFlowExprDepth -= 1;
+}
+
+function trackTemporary(context: Context, func: Func, value: ValueRef, typeID: TypeID): void {
+  // The common case of straight-line control flow is easy
+  if (context.controlFlowExprDepth === 0) {
+    context.temporaries.push({kind: 'Normal', typeID, value});
+    return;
+  }
+
+  // Allocate a new local variable that will be used to pass this temporary
+  // object to "releaseTemporaries" at the end of the statement
+  const local = createLocal(func, rawTypeForTypeID(context, typeID));
+
+  // Zero this local variable before the control flow forks (null values won't
+  // be released by "releaseTemporaries")
+  addLocalSet(func, context.stmtStartBlockIndex, local, createConstant(func, 0));
+
+  // Overwrite the null value at the current instruction
+  addLocalSet(func, context.currentBlock, local, value);
+  context.temporaries.push({kind: 'Branch', typeID, local});
+}
+
+function releaseTemporaries(context: Context, func: Func): void {
+  for (const temp of context.temporaries) {
+    switch (temp.kind) {
+      case 'Normal': {
+        const type = context.types[temp.typeID.index];
+        assert(type.hasRefCount);
+        addRelease(func, context.currentBlock, temp.value, type.dtorIndex);
+        break;
+      }
+
+      // Handle allocations inside conditional branches, which are stored in a
+      // local variable and may be null
+      case 'Branch': {
+        const type = context.types[temp.typeID.index];
+        assert(type.hasRefCount);
+        const ptr = addLocalGet(func, context.currentBlock, temp.local);
+        const release = createBlock(func);
+        const next = createBlock(func);
+        setJumpBranch(func, context.currentBlock, ptr,
+          {kind: 'Child', index: release},
+          {kind: 'Next', parent: context.currentBlock});
+        addRelease(func, release, ptr, type.dtorIndex);
+        setJumpGoto(func, release, {kind: 'Next', parent: context.currentBlock});
+        context.currentBlock = next;
+        break;
+      }
+
+      default: {
+        const checkCovered: void = temp;
+        throw new Error('Internal error');
+      }
+    }
+  }
+
+  context.temporaries = [];
 }
 
 function resolveTypeExpr(context: Context, type: TypeExpr): TypeID {
@@ -310,6 +405,84 @@ function compileTypes(context: Context, parsed: Parsed): void {
         type.allocSize = ctorOffset;
       }
     }
+  }
+
+  // Create destructors
+  for (const [typeID, ctors] of list) {
+    const type = context.types[typeID.index];
+    if (!type.hasRefCount) {
+      continue;
+    }
+
+    const func = createFunc(`dtor-${type.name}`, context.ptrType);
+    const index = context.code.funcs.length;
+    context.code.funcs.push(func);
+    type.dtorIndex = index;
+
+    // Set the signature
+    const rawType = rawTypeForTypeID(context, typeID);
+    const argIndex = createLocal(func, rawType);
+    func.argTypes.push(rawType);
+    func.retType = RawType.Void;
+
+    // Decrement the reference count
+    const subBlock = createBlock(func);
+    const ptr = addLocalGet(func, subBlock, argIndex);
+    const refCount = addMemGet(func, subBlock, ptr, 0, 4);
+    const sub = addBinary(func, subBlock, BinIns.Sub32, refCount, createConstant(func, 1));
+
+    // Update the reference count if it's greater than 0
+    const updateBlock = createBlock(func);
+    addMemSet(func, updateBlock, ptr, 0, 4, sub);
+
+    // Free the object if the reference count is 0
+    const freeBlock = createBlock(func);
+    let currentBlock = freeBlock;
+
+    // Release all relevant fields first
+    for (let i = 0; i < type.ctors.length; i++) {
+      const ctor = type.ctors[i];
+      const parent = currentBlock;
+
+      // There's no need to release fields for this constructor if there aren't any
+      if (ctor.args.length === 0) {
+        continue;
+      }
+
+      // Check for tag equality
+      if (type.tagOffset !== null) {
+        const tag = addMemGet(func, parent, ptr, type.tagOffset, 4);
+        const equals = addBinary(func, parent, BinIns.Eq32, tag, createConstant(func, i));
+        currentBlock = createBlock(func);
+        setJumpBranch(func, parent, equals,
+          {kind: 'Child', index: currentBlock},
+          {kind: 'Next', parent});
+      }
+
+      // Release all fields for this constructor
+      for (let j = 0; j < ctor.args.length; j++) {
+        const fieldType = context.types[ctor.args[j].typeID.index];
+        if (fieldType.hasRefCount) {
+          const fieldPtr = addMemGet(func, currentBlock, ptr, ctor.fieldOffsets[j], fieldType.fieldSize);
+          addRelease(func, currentBlock, fieldPtr, fieldType.dtorIndex);
+        }
+      }
+
+      // If we checked for tag equality, merge control flow again
+      if (type.tagOffset !== null) {
+        setJumpGoto(func, currentBlock, {kind: 'Next', parent});
+        currentBlock = createBlock(func);
+        setNext(func, parent, currentBlock);
+      }
+    }
+
+    // Free the memory after fields have been released
+    addMemFree(func, currentBlock, ptr, createConstant(func, type.allocSize));
+
+    // Branch off the reference count subtraction
+    setJumpBranch(func, subBlock, sub,
+      {kind: 'Child', index: updateBlock},
+      {kind: 'Child', index: freeBlock});
   }
 }
 
@@ -459,21 +632,28 @@ function compileDefs(context: Context, parsed: Parsed): void {
 
     const func = context.code.funcs[data.kind.index];
     const scope = createScope(null);
+    context.currentBlock = createBlock(func);
+    func.retType = rawTypeForTypeID(context, data.retTypeID);
 
     // Add a local variable for each argument
     for (let i = 0; i < def.args.length; i++) {
       const arg = def.args[i];
       const typeID = data.args[i].typeID;
-      defineLocal(context, func, scope, arg.name, arg.nameRange, typeID);
+      const local = defineLocal(context, func, scope, arg.name, arg.nameRange, typeID);
       func.argTypes.push(rawTypeForTypeID(context, typeID));
+
+      // Retain each argument at the top of the function
+      const type = context.types[typeID.index];
+      if (type.hasRefCount) {
+        addRetain(func, context.currentBlock, addLocalGet(func, context.currentBlock, local));
+      }
     }
 
     // Compile the body
-    context.currentBlock = createBlock(func);
-    func.retType = rawTypeForTypeID(context, data.retTypeID);
     if (def.body !== null) {
       compileStmts(context, def.body, func, scope, data.retTypeID);
     }
+    releaseLocalsForScope(context, func, scope);
 
     // Check for a missing return statement
     if (data.retTypeID !== context.voidTypeID) {
@@ -482,6 +662,9 @@ function compileDefs(context: Context, parsed: Parsed): void {
         appendToLog(context.log, def.nameRange, `Not all code paths return a value`);
       }
     }
+
+    // Optimize each function after compiling it
+    optimize(func);
   }
 }
 
@@ -536,8 +719,14 @@ function compileMatchOrExpr(context: Context, func: Func, scope: Scope, test: Ex
     const pattern = args[i];
     const arg = ctor.args[i];
     const local = defineLocal(context, func, scope, pattern.name, pattern.range, arg.typeID);
-    const value = addMemGet(func, trueBlock, result.value,
-      ctor.fieldOffsets[i], context.types[arg.typeID.index].fieldSize);
+    const type = context.types[arg.typeID.index];
+    const value = addMemGet(func, trueBlock, result.value, ctor.fieldOffsets[i], type.fieldSize);
+
+    // Retain the value before we store it
+    if (type.hasRefCount) {
+      addRetain(func, trueBlock, value);
+    }
+
     addLocalSet(func, trueBlock, local, value);
   }
 
@@ -547,10 +736,24 @@ function compileMatchOrExpr(context: Context, func: Func, scope: Scope, test: Ex
   };
 }
 
+function releaseLocalsForScope(context: Context, func: Func, scope: Scope): void {
+  var locals = scope.locals;
+
+  for (const local of locals.values()) {
+    const type = context.types[local.typeID.index];
+    if (type.hasRefCount) {
+      const ptr = addLocalGet(func, context.currentBlock, local.index);
+      addRelease(func, context.currentBlock, ptr, type.dtorIndex);
+    }
+  }
+}
+
 function compileStmts(context: Context, stmts: Stmt[], func: Func, parent: Scope, retTypeID: TypeID): void {
   const scope = createScope(parent);
 
   for (const stmt of stmts) {
+    context.stmtStartBlockIndex = context.currentBlock;
+
     switch (stmt.kind.kind) {
       case 'Var': {
         const type = stmt.kind.type;
@@ -576,8 +779,14 @@ function compileStmts(context: Context, stmts: Stmt[], func: Func, parent: Scope
           initial = compileExpr(context, value, func, scope, typeID);
         }
 
+        // Retain the value before we store it
+        if (context.types[typeID.index].hasRefCount) {
+          addRetain(func, context.currentBlock, initial.value);
+        }
+
         const local = defineLocal(context, func, scope, stmt.kind.name, stmt.kind.nameRange, typeID);
         addLocalSet(func, context.currentBlock, local, initial.value);
+        releaseTemporaries(context, func);
         break;
       }
 
@@ -588,8 +797,8 @@ function compileStmts(context: Context, stmts: Stmt[], func: Func, parent: Scope
             appendToLog(context.log, stmt.kind.value.range, `Unexpected return value in a function without a return type`);
           } else {
             const result = compileExpr(context, stmt.kind.value, func, scope, retTypeID);
+            releaseTemporaries(context, func);
             setJumpReturn(func, context.currentBlock, result.value);
-            context.currentBlock = createBlock(func);
           }
         }
 
@@ -598,10 +807,13 @@ function compileStmts(context: Context, stmts: Stmt[], func: Func, parent: Scope
           if (retTypeID !== context.voidTypeID) {
             appendToLog(context.log, stmt.range, `Must return a value of type "${context.types[retTypeID.index].name}"`);
           } else {
+            releaseTemporaries(context, func);
             setJumpReturn(func, context.currentBlock, null);
-            context.currentBlock = createBlock(func);
           }
         }
+
+        // Add any dead code following this statement to an unused block
+        context.currentBlock = createBlock(func);
         break;
       }
 
@@ -610,7 +822,13 @@ function compileStmts(context: Context, stmts: Stmt[], func: Func, parent: Scope
 
         // The parser handles out-of-bounds error reporting
         if (count >= 1 && count <= context.loops.length) {
-          setJumpGoto(func, context.currentBlock, {kind: 'Next', parent: context.loops[context.loops.length - count]});
+          const loop = context.loops[context.loops.length - count];
+          for (let s: Scope | null = scope; s !== null && s !== loop.scope; s = s.parent) {
+            releaseLocalsForScope(context, func, s);
+          }
+          setJumpGoto(func, context.currentBlock, {kind: 'Next', parent: loop.block});
+
+          // Add any dead code following this statement to an unused block
           context.currentBlock = createBlock(func);
         }
         break;
@@ -621,7 +839,13 @@ function compileStmts(context: Context, stmts: Stmt[], func: Func, parent: Scope
 
         // The parser handles out-of-bounds error reporting
         if (count >= 1 && count <= context.loops.length) {
-          setJumpGoto(func, context.currentBlock, {kind: 'Loop', parent: context.loops[context.loops.length - count]});
+          const loop = context.loops[context.loops.length - count];
+          for (let s: Scope | null = scope; s !== null && s !== loop.scope; s = s.parent) {
+            releaseLocalsForScope(context, func, s);
+          }
+          setJumpGoto(func, context.currentBlock, {kind: 'Loop', parent: loop.block});
+
+          // Add any dead code following this statement to an unused block
           context.currentBlock = createBlock(func);
         }
         break;
@@ -631,10 +855,16 @@ function compileStmts(context: Context, stmts: Stmt[], func: Func, parent: Scope
         const thenBlock = createBlock(func);
         const thenScope = createScope(scope);
         const test = compileMatchOrExpr(context, func, thenScope, stmt.kind.test, thenBlock);
+        const hasMatchLocals = thenScope.locals.size !== 0;
         const parent = context.currentBlock;
 
+        // We can only release the locals now if this wasn't a match expression
+        if (!hasMatchLocals) {
+          releaseTemporaries(context, func);
+        }
+
         // Without an else
-        if (stmt.kind.no.length === 0) {
+        if (!hasMatchLocals && stmt.kind.no.length === 0) {
           setJumpBranch(func, parent, test.value,
             {kind: 'Child', index: thenBlock},
             {kind: 'Next', parent});
@@ -653,12 +883,17 @@ function compileStmts(context: Context, stmts: Stmt[], func: Func, parent: Scope
             {kind: 'Child', index: elseBlock});
 
           // Then branch
+          const temporariesForElse = context.temporaries;
           context.currentBlock = thenBlock;
+          releaseTemporaries(context, func);
           compileStmts(context, stmt.kind.yes, func, thenScope, retTypeID);
+          releaseLocalsForScope(context, func, thenScope);
           setJumpGoto(func, context.currentBlock, {kind: 'Next', parent});
 
           // Else branch
           context.currentBlock = elseBlock;
+          context.temporaries = temporariesForElse;
+          releaseTemporaries(context, func); // Release temporaries again for the else branch
           compileStmts(context, stmt.kind.no, func, scope, retTypeID);
           setJumpGoto(func, context.currentBlock, {kind: 'Next', parent});
         }
@@ -687,18 +922,47 @@ function compileStmts(context: Context, stmts: Stmt[], func: Func, parent: Scope
         const bodyScope = createScope(scope);
         if (testExpr.kind.kind === 'Bool' && testExpr.kind.value === true) {
           setJumpGoto(func, header, {kind: 'Next', parent: header});
+          setNext(func, context.currentBlock, body);
+          context.currentBlock = body;
         } else {
           const test = compileMatchOrExpr(context, func, bodyScope, stmt.kind.test, body);
-          setJumpBranch(func, context.currentBlock, test.value,
-            {kind: 'Next', parent: context.currentBlock},
-            {kind: 'Next', parent: loop});
+          const hasMatchLocals = bodyScope.locals.size !== 0;
+
+          // We can only release the locals now if this wasn't a match expression
+          if (!hasMatchLocals) {
+            releaseTemporaries(context, func);
+            setJumpBranch(func, context.currentBlock, test.value,
+              {kind: 'Next', parent: context.currentBlock},
+              {kind: 'Next', parent: loop});
+            setNext(func, context.currentBlock, body);
+            context.currentBlock = body;
+          }
+
+          // Match expressions must release locals in both branches
+          else {
+            const temporariesForBody = context.temporaries;
+            const elseBlock = createBlock(func);
+            setJumpBranch(func, context.currentBlock, test.value,
+              {kind: 'Next', parent: context.currentBlock},
+              {kind: 'Child', index: elseBlock});
+            setNext(func, context.currentBlock, body);
+
+            // Release temporaries before breaking out of the loop
+            context.currentBlock = elseBlock;
+            releaseTemporaries(context, func);
+            setJumpGoto(func, elseBlock, {kind: 'Next', parent: loop});
+
+            // Release temporaries again before continuing the loop
+            context.currentBlock = body;
+            context.temporaries = temporariesForBody;
+            releaseTemporaries(context, func);
+          }
         }
 
         // Compile the body
-        setNext(func, context.currentBlock, body);
-        context.currentBlock = body;
-        context.loops.push(loop);
+        context.loops.push({scope, block: loop});
         compileStmts(context, stmt.kind.body, func, bodyScope, retTypeID);
+        releaseLocalsForScope(context, func, bodyScope);
         context.loops.pop();
         setJumpGoto(func, context.currentBlock, {kind: 'Loop', parent: loop});
 
@@ -721,7 +985,16 @@ function compileStmts(context: Context, stmts: Stmt[], func: Func, parent: Scope
         const local = findLocal(scope, name);
         if (local !== null) {
           const result = compileExpr(context, stmt.kind.value, func, scope, local.typeID);
+          const type = context.types[local.typeID.index];
+
+          // Balance reference counts
+          if (type.hasRefCount) {
+            addRetain(func, context.currentBlock, result.value);
+            addRelease(func, context.currentBlock, addLocalGet(func, context.currentBlock, local.index), type.dtorIndex);
+          }
+
           addLocalSet(func, context.currentBlock, local.index, result.value);
+          releaseTemporaries(context, func);
           break;
         }
 
@@ -734,6 +1007,7 @@ function compileStmts(context: Context, stmts: Stmt[], func: Func, parent: Scope
             const size = context.types[data.typeID.index].fieldSize;
             const result = compileExpr(context, stmt.kind.value, func, scope, data.typeID);
             addMemSet(func, context.currentBlock, ptr, 0, size, result.value);
+            releaseTemporaries(context, func);
           } else {
             appendToLog(context.log, target.range, `Cannot use the name "${name}" as a value`);
           }
@@ -746,6 +1020,7 @@ function compileStmts(context: Context, stmts: Stmt[], func: Func, parent: Scope
 
       case 'Expr':
         compileExpr(context, stmt.kind.value, func, scope, null);
+        releaseTemporaries(context, func);
         break;
 
       default: {
@@ -754,6 +1029,8 @@ function compileStmts(context: Context, stmts: Stmt[], func: Func, parent: Scope
       }
     }
   }
+
+  releaseLocalsForScope(context, func, scope);
 }
 
 interface Result {
@@ -838,7 +1115,8 @@ function compileArgs(context: Context, range: Range, exprs: Expr[], func: Func, 
   return results;
 }
 
-function allocType(context: Context, func: Func, type: TypeData, ctorIndex: number, args: Result[]): ValueRef {
+function allocType(context: Context, func: Func, typeID: TypeID, ctorIndex: number, args: Result[]): ValueRef {
+  const type = context.types[typeID.index];
   const ptr = addMemAlloc(func, context.currentBlock, createConstant(func, type.allocSize));
 
   // Initialize the reference count to 1
@@ -854,10 +1132,20 @@ function allocType(context: Context, func: Func, type: TypeData, ctorIndex: numb
   // Initialize each field
   const ctor = type.ctors[ctorIndex];
   for (let i = 0; i < args.length; i++) {
-    const size = context.types[ctor.args[i].typeID.index].fieldSize;
-    addMemSet(func, context.currentBlock, ptr, ctor.fieldOffsets[i], size, args[i].value);
+    const fieldType = context.types[ctor.args[i].typeID.index];
+    const size = fieldType.fieldSize;
+    const value = args[i].value;
+
+    // Retain the value before we store it
+    if (fieldType.hasRefCount) {
+      addRetain(func, context.currentBlock, value);
+    }
+
+    addMemSet(func, context.currentBlock, ptr, ctor.fieldOffsets[i], size, value);
   }
 
+  // Release this object at the end of the statement if it wasn't stored anywhere
+  trackTemporary(context, func, ptr, typeID);
   return ptr;
 }
 
@@ -906,7 +1194,7 @@ function compileExpr(context: Context, expr: Expr, func: Func, scope: Scope, cas
           const args = compileArgs(context, expr.range, [], func, scope, ctor.args);
           result = {
             typeID: global.typeID,
-            value: allocType(context, func, type, global.index, args),
+            value: allocType(context, func, global.typeID, global.index, args),
           };
         } else if (global.kind === 'Var') {
           const data = context.vars[global.varID];
@@ -1032,7 +1320,7 @@ function compileExpr(context: Context, expr: Expr, func: Func, scope: Scope, cas
         const args = compileArgs(context, expr.range, expr.kind.args, func, scope, ctor.args);
         result = {
           typeID: global.typeID,
-          value: allocType(context, func, type, global.index, args),
+          value: allocType(context, func, global.typeID, global.index, args),
         };
       }
 
@@ -1110,6 +1398,7 @@ function compileExpr(context: Context, expr: Expr, func: Func, scope: Scope, cas
     case 'Branch': {
       const test = compileExpr(context, expr.kind.test, func, scope, context.boolTypeID);
       const parent = context.currentBlock;
+      beforeControlFlowFork(context);
 
       // Then branch
       const thenBlock = createBlock(func);
@@ -1130,6 +1419,7 @@ function compileExpr(context: Context, expr: Expr, func: Func, scope: Scope, cas
       const next = createBlock(func);
       setNext(func, parent, next);
       context.currentBlock = next;
+      afterControlFlowFork(context);
 
       // Merge the data using a local variable
       if (yes.typeID !== no.typeID) {
@@ -1251,6 +1541,7 @@ function compileShortCircuit(context: Context, func: Func, scope: Scope, op: Bin
   const left = compileExpr(context, leftExpr, func, scope, context.boolTypeID);
   const leftEnd = context.currentBlock;
   addLocalSet(func, leftEnd, local, left.value);
+  beforeControlFlowFork(context);
 
   // Skip the right if the condition was met
   const rightStart = createBlock(func);
@@ -1269,6 +1560,7 @@ function compileShortCircuit(context: Context, func: Func, scope: Scope, op: Bin
 
   // Merge the control flow for following expressions
   context.currentBlock = next;
+  afterControlFlowFork(context);
   return {
     typeID: context.boolTypeID,
     value: addLocalGet(func, context.currentBlock, local),
@@ -1383,6 +1675,9 @@ export function compile(log: Log, parsed: Parsed, ptrType: RawType): Code {
     // Function-specific temporaries
     currentBlock: -1,
     loops: [],
+    temporaries: [],
+    controlFlowExprDepth: 0,
+    stmtStartBlockIndex: 0,
 
     // Built-in types
     errorTypeID: {index: 0},

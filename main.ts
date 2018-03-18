@@ -54,7 +54,7 @@ def _free(ptr int, size int) {
 }
 `;
 
-export function run(input: string): {log: string, wasm: Uint8Array | null} {
+export function run(input: string): {log: string, wasm: Uint8Array | null, debug: string | null} {
   const sourceNames = ['<stdin>', '<library>'];
   const sources = [input, library];
   const log: Log = {messages: []};
@@ -65,14 +65,14 @@ export function run(input: string): {log: string, wasm: Uint8Array | null} {
   }
 
   if (log.messages.length > 0) {
-    return {log: logToString(log, sourceNames, sources), wasm: null};
+    return {log: logToString(log, sourceNames, sources), wasm: null, debug: null};
   }
 
   const code = compile(log, parsed, RawType.I32);
 
   if (log.messages.length > 0) {
-    return {log: logToString(log, sourceNames, sources), wasm: null};
+    return {log: logToString(log, sourceNames, sources), wasm: null, debug: null};
   }
 
-  return {log: '', wasm: encodeWASM(code)};
+  return {log: '', wasm: encodeWASM(code), debug: codeToString(code)};
 }
