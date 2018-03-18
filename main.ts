@@ -7,7 +7,6 @@ import { encodeWASM } from './wasm';
 const library = `
 type int
 type bool
-type string
 
 @intrinsic("wasm.grow_memory")
 def _growMemory(pageCount int) int

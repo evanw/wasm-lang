@@ -125,7 +125,6 @@ interface Context {
   voidTypeID: TypeID;
   boolTypeID: TypeID;
   intTypeID: TypeID;
-  stringTypeID: TypeID;
 }
 
 function findGlobal(scope: GlobalScope, source: number, name: string): GlobalRef | null {
@@ -266,7 +265,6 @@ function compileTypes(context: Context, parsed: Parsed): void {
   // Bind built-in types
   context.boolTypeID = resolveTypeName(context, {source: -1, start: 0, end: 0}, 'bool');
   context.intTypeID = resolveTypeName(context, {source: -1, start: 0, end: 0}, 'int');
-  context.stringTypeID = resolveTypeName(context, {source: -1, start: 0, end: 0}, 'string');
 
   // Primitive types have a fixed size and are not reference counted
   const intType = context.types[context.intTypeID.index];
@@ -1391,7 +1389,6 @@ export function compile(log: Log, parsed: Parsed, ptrType: RawType): Code {
     voidTypeID: {index: 0},
     boolTypeID: {index: 0},
     intTypeID: {index: 0},
-    stringTypeID: {index: 0},
   };
 
   context.errorTypeID = addTypeID(context, {source: -1, start: 0, end: 0}, '(error)', 0);
