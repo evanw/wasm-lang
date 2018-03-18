@@ -16,13 +16,15 @@ import {
   InsRef,
   JumpTarget,
   RawType,
-  setJump,
   setNext,
   unwrapRef,
   ValueRef,
   addMemGet,
   addMemSet,
   createCode,
+  setJumpGoto,
+  setJumpBranch,
+  setJumpReturn,
 } from './ssa';
 import { assert, align } from './util';
 
@@ -582,7 +584,7 @@ function compileStmts(context: Context, stmts: Stmt[], func: Func, parent: Scope
             appendToLog(context.log, stmt.kind.value.range, `Unexpected return value in a function without a return type`);
           } else {
             const result = compileExpr(context, stmt.kind.value, func, scope, retTypeID);
-            setJump(func, context.currentBlock, {kind: 'Return', value: result.value.ref});
+            setJumpReturn(func, context.currentBlock, result.value);
             context.currentBlock = createBlock(func);
           }
         }
@@ -592,7 +594,7 @@ function compileStmts(context: Context, stmts: Stmt[], func: Func, parent: Scope
           if (retTypeID !== context.voidTypeID) {
             appendToLog(context.log, stmt.range, `Must return a value of type "${context.types[retTypeID.index].name}"`);
           } else {
-            setJump(func, context.currentBlock, {kind: 'ReturnVoid'});
+            setJumpReturn(func, context.currentBlock, null);
             context.currentBlock = createBlock(func);
           }
         }
@@ -604,8 +606,7 @@ function compileStmts(context: Context, stmts: Stmt[], func: Func, parent: Scope
 
         // The parser handles out-of-bounds error reporting
         if (count >= 1 && count <= context.loops.length) {
-          const target: JumpTarget = {kind: 'Next', parent: context.loops[context.loops.length - count]};
-          setJump(func, context.currentBlock, {kind: 'Goto', target});
+          setJumpGoto(func, context.currentBlock, {kind: 'Next', parent: context.loops[context.loops.length - count]});
           context.currentBlock = createBlock(func);
         }
         break;
@@ -616,8 +617,7 @@ function compileStmts(context: Context, stmts: Stmt[], func: Func, parent: Scope
 
         // The parser handles out-of-bounds error reporting
         if (count >= 1 && count <= context.loops.length) {
-          const target: JumpTarget = {kind: 'Loop', parent: context.loops[context.loops.length - count]};
-          setJump(func, context.currentBlock, {kind: 'Goto', target});
+          setJumpGoto(func, context.currentBlock, {kind: 'Loop', parent: context.loops[context.loops.length - count]});
           context.currentBlock = createBlock(func);
         }
         break;
@@ -631,38 +631,32 @@ function compileStmts(context: Context, stmts: Stmt[], func: Func, parent: Scope
 
         // Without an else
         if (stmt.kind.no.length === 0) {
-          setJump(func, parent, {
-            kind: 'Branch',
-            value: test.value.ref,
-            yes: {kind: 'Child', index: thenBlock},
-            no: {kind: 'Next', parent},
-          });
+          setJumpBranch(func, parent, test.value,
+            {kind: 'Child', index: thenBlock},
+            {kind: 'Next', parent});
 
           // Then branch
           context.currentBlock = thenBlock;
           compileStmts(context, stmt.kind.yes, func, thenScope, retTypeID);
-          setJump(func, context.currentBlock, {kind: 'Goto', target: {kind: 'Next', parent}});
+          setJumpGoto(func, context.currentBlock, {kind: 'Next', parent});
         }
 
         // With an else
         else {
           const elseBlock = createBlock(func);
-          setJump(func, parent, {
-            kind: 'Branch',
-            value: test.value.ref,
-            yes: {kind: 'Child', index: thenBlock},
-            no: {kind: 'Child', index: elseBlock},
-          });
+          setJumpBranch(func, parent, test.value,
+            {kind: 'Child', index: thenBlock},
+            {kind: 'Child', index: elseBlock});
 
           // Then branch
           context.currentBlock = thenBlock;
           compileStmts(context, stmt.kind.yes, func, thenScope, retTypeID);
-          setJump(func, context.currentBlock, {kind: 'Goto', target: {kind: 'Next', parent}});
+          setJumpGoto(func, context.currentBlock, {kind: 'Next', parent});
 
           // Else branch
           context.currentBlock = elseBlock;
           compileStmts(context, stmt.kind.no, func, scope, retTypeID);
-          setJump(func, context.currentBlock, {kind: 'Goto', target: {kind: 'Next', parent}});
+          setJumpGoto(func, context.currentBlock, {kind: 'Next', parent});
         }
 
         // Merge the control flow for following statements
@@ -678,9 +672,9 @@ function compileStmts(context: Context, stmts: Stmt[], func: Func, parent: Scope
 
         // Create the loop header
         const header = createBlock(func);
-        setJump(func, previous, {kind: 'Goto', target: {kind: 'Next', parent: previous}});
+        setJumpGoto(func, previous, {kind: 'Next', parent: previous});
         setNext(func, previous, loop);
-        setJump(func, loop, {kind: 'Goto', target: {kind: 'Child', index: header}});
+        setJumpGoto(func, loop, {kind: 'Child', index: header});
         context.currentBlock = header;
 
         // Compile the test (special-case "while true" for "return" statement checking)
@@ -688,15 +682,12 @@ function compileStmts(context: Context, stmts: Stmt[], func: Func, parent: Scope
         const body = createBlock(func);
         const bodyScope = createScope(scope);
         if (testExpr.kind.kind === 'Bool' && testExpr.kind.value === true) {
-          setJump(func, header, {kind: 'Goto', target: {kind: 'Next', parent: header}});
+          setJumpGoto(func, header, {kind: 'Next', parent: header});
         } else {
           const test = compileMatchOrExpr(context, func, bodyScope, stmt.kind.test, body);
-          setJump(func, context.currentBlock, {
-            kind: 'Branch',
-            value: test.value.ref,
-            yes: {kind: 'Next', parent: context.currentBlock},
-            no: {kind: 'Next', parent: loop},
-          });
+          setJumpBranch(func, context.currentBlock, test.value,
+            {kind: 'Next', parent: context.currentBlock},
+            {kind: 'Next', parent: loop});
         }
 
         // Compile the body
@@ -705,7 +696,7 @@ function compileStmts(context: Context, stmts: Stmt[], func: Func, parent: Scope
         context.loops.push(loop);
         compileStmts(context, stmt.kind.body, func, bodyScope, retTypeID);
         context.loops.pop();
-        setJump(func, context.currentBlock, {kind: 'Goto', target: {kind: 'Loop', parent: loop}});
+        setJumpGoto(func, context.currentBlock, {kind: 'Loop', parent: loop});
 
         // Merge the control flow for following statements
         const next = createBlock(func);
@@ -1136,21 +1127,18 @@ function compileExpr(context: Context, expr: Expr, func: Func, scope: Scope, cas
       const thenBlock = createBlock(func);
       context.currentBlock = thenBlock;
       const yes = compileExpr(context, expr.kind.yes, func, scope, null);
-      setJump(func, thenBlock, {kind: 'Goto', target: {kind: 'Next', parent}});
+      setJumpGoto(func, thenBlock, {kind: 'Next', parent});
 
       // Else branch
       const elseBlock = createBlock(func);
       context.currentBlock = elseBlock;
       const no = compileExpr(context, expr.kind.no, func, scope, null);
-      setJump(func, elseBlock, {kind: 'Goto', target: {kind: 'Next', parent}});
+      setJumpGoto(func, elseBlock, {kind: 'Next', parent});
 
       // Merge the control flow for following expressions
-      setJump(func, parent, {
-        kind: 'Branch',
-        value: test.value.ref,
-        yes: {kind: 'Child', index: thenBlock},
-        no: {kind: 'Child', index: elseBlock},
-      });
+      setJumpBranch(func, parent, test.value,
+        {kind: 'Child', index: thenBlock},
+        {kind: 'Child', index: elseBlock});
       const next = createBlock(func);
       setNext(func, parent, next);
       context.currentBlock = next;
@@ -1288,12 +1276,9 @@ function compileShortCircuit(context: Context, func: Func, scope: Scope, op: Bin
   // Skip the right if the condition was met
   const rightStart = createBlock(func);
   const next = createBlock(func);
-  setJump(func, leftEnd, {
-    kind: 'Branch',
-    value: left.value.ref,
-    yes: op === BinOp.And ? {kind: 'Child', index: rightStart} : {kind: 'Next', parent: leftEnd},
-    no: op === BinOp.And ? {kind: 'Next', parent: leftEnd} : {kind: 'Child', index: rightStart},
-  });
+  setJumpBranch(func, leftEnd, left.value,
+    op === BinOp.And ? {kind: 'Child', index: rightStart} : {kind: 'Next', parent: leftEnd},
+    op === BinOp.And ? {kind: 'Next', parent: leftEnd} : {kind: 'Child', index: rightStart});
   setNext(func, leftEnd, next);
 
   // Otherwise evaluate the right
@@ -1301,10 +1286,7 @@ function compileShortCircuit(context: Context, func: Func, scope: Scope, op: Bin
   const right = compileExpr(context, rightExpr, func, scope, context.boolTypeID);
   const rightEnd = context.currentBlock;
   addLocalSet(func, rightEnd, local, right.value);
-  setJump(func, rightEnd, {
-    kind: 'Goto',
-    target: {kind: 'Next', parent: leftEnd},
-  });
+  setJumpGoto(func, rightEnd, {kind: 'Next', parent: leftEnd});
 
   // Merge the control flow for following expressions
   context.currentBlock = next;

@@ -188,8 +188,16 @@ export function createBlock(func: Func): number {
   return func.blocks.length - 1;
 }
 
-export function setJump(func: Func, block: number, jump: Jump): void {
-  func.blocks[block].jump = jump;
+export function setJumpGoto(func: Func, block: number, target: JumpTarget): void {
+  func.blocks[block].jump = {kind: 'Goto', target};
+}
+
+export function setJumpBranch(func: Func, block: number, value: ValueRef, yes: JumpTarget, no: JumpTarget): void {
+  func.blocks[block].jump = {kind: 'Branch', value: unwrapRef(func, block, value), yes, no};
+}
+
+export function setJumpReturn(func: Func, block: number, value: ValueRef | null): void {
+  func.blocks[block].jump = value === null ? {kind: 'ReturnVoid'} : {kind: 'Return', value: unwrapRef(func, block, value)};
 }
 
 export function setNext(func: Func, block: number, next: number): void {
