@@ -53,7 +53,11 @@ def main() int {
 <p><button id="run">Run</button></p>
 <script>
   stdin.oninput = () => {
-    const {log, wasm} = Compiler.run(stdin.value);
+    try {
+      var {log, wasm} = Compiler.run(stdin.value);
+    } catch (e) {
+      log = e.stack;
+    }
     if (log) {
       stdout.value = log;
       run.onclick = null;
@@ -64,10 +68,16 @@ def main() int {
       module.applyNames();
       stdout.value = module.toText({foldExprs: true, inlineExport: true});
       run.onclick = async () => {
-        const ptrs = new Set;
+        const ptrs = new Map;
         const imports = {
-          afterMalloc(ptr) { ptrs.add(ptr); },
-          afterFree(ptr) { ptrs.delete(ptr); },
+          afterMalloc(ptr, size) {
+            ptrs.set(ptr, size);
+          },
+          afterFree(ptr, size) {
+            if (!ptrs.has(ptr)) throw new Error(`Free of invalid pointer ${ptr}`);
+            if (ptrs.get(ptr) !== size) throw new Error(`Free of size ${ptr} for allocation of size ${ptrs.get(ptr)}`);
+            ptrs.delete(ptr);
+          },
         };
         try {
           const {instance} = await WebAssembly.instantiate(wasm, {imports});

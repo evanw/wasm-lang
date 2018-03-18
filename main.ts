@@ -19,10 +19,10 @@ def _currentMemory() int
 def _abort()
 
 @import("afterMalloc")
-def _afterMalloc(ptr int)
+def _afterMalloc(ptr int, size int)
 
 @import("afterFree")
-def _afterFree(ptr int)
+def _afterFree(ptr int, size int)
 
 var _ptr = 0
 var _end = 0
@@ -46,12 +46,12 @@ def _malloc(size int) int {
   # Use a bump allocator
   var ptr = _ptr
   _ptr = (_ptr + size + 7) & ~7
-  _afterMalloc(ptr)
+  _afterMalloc(ptr, size)
   return ptr
 }
 
-def _free(ptr int) {
-  _afterFree(ptr)
+def _free(ptr int, size int) {
+  _afterFree(ptr, size)
 }
 `;
 
