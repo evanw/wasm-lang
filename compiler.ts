@@ -27,6 +27,7 @@ import {
   setJumpReturn,
   addBinary,
   BinIns,
+  addMemAlloc,
 } from './ssa';
 import { assert, align } from './util';
 
@@ -837,8 +838,7 @@ function compileArgs(context: Context, range: Range, exprs: Expr[], func: Func, 
 }
 
 function allocType(context: Context, func: Func, type: TypeData, ctorIndex: number, args: Result[]): ValueRef {
-  const size = createConstant(func, type.allocSize).ref;
-  const ptr = addIns(func, context.currentBlock, {kind: 'MemAlloc', size});
+  const ptr = addMemAlloc(func, context.currentBlock, createConstant(func, type.allocSize));
 
   // Initialize the reference count to 1
   if (type.hasRefCount) {

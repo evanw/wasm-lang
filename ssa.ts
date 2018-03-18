@@ -287,6 +287,14 @@ export function addLocalSet(func: Func, block: number, local: number, value: Val
   return addIns(func, block, {kind: 'LocalSet', local, value: ref});
 }
 
+export function addMemAlloc(func: Func, block: number, size: ValueRef): ValueRef {
+  return addIns(func, block, {kind: 'MemAlloc', size: unwrapRef(func, block, size)});
+}
+
+export function addMemFree(func: Func, block: number, ptr: ValueRef, size: ValueRef): void {
+  addIns(func, block, {kind: 'MemFree', ptr: unwrapRef(func, block, ptr), size: unwrapRef(func, block, size)});
+}
+
 export function argsOf(ins: Ins): InsRef[] {
   switch (ins.kind) {
     case 'Call': return ins.args;
