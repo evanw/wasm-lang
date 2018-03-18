@@ -1,7 +1,6 @@
 import { Log, Range, appendToLog } from './log';
 import { Parsed, TypeExpr, CtorDecl, DefDecl, Stmt, Expr, BinOp, UnOp, Tag, Pattern } from './parser';
 import {
-  addIns,
   addLocalGet,
   addLocalSet,
   buildBlockMetas,
@@ -28,6 +27,10 @@ import {
   addBinary,
   BinIns,
   addMemAlloc,
+  addCall,
+  addCallImport,
+  addCallIntrinsic,
+  addPtrGlobal,
 } from './ssa';
 import { assert, align } from './util';
 
@@ -729,7 +732,7 @@ function compileStmts(context: Context, stmts: Stmt[], func: Func, parent: Scope
         if (global !== null) {
           if (global.kind === 'Var') {
             const data = context.vars[global.varID];
-            const ptr = addIns(func, context.currentBlock, {kind: 'PtrGlobal', index: data.index});
+            const ptr = addPtrGlobal(func, context.currentBlock, data.index);
             const size = context.types[data.typeID.index].fieldSize;
             const result = compileExpr(context, stmt.kind.value, func, scope, data.typeID);
             addMemSet(func, context.currentBlock, ptr, 0, size, result.value);
@@ -909,7 +912,7 @@ function compileExpr(context: Context, expr: Expr, func: Func, scope: Scope, cas
           };
         } else if (global.kind === 'Var') {
           const data = context.vars[global.varID];
-          const ptr = addIns(func, context.currentBlock, {kind: 'PtrGlobal', index: data.index});
+          const ptr = addPtrGlobal(func, context.currentBlock, data.index);
           const size = context.types[data.typeID.index].fieldSize;
           result = {
             typeID: data.typeID,
@@ -1040,29 +1043,26 @@ function compileExpr(context: Context, expr: Expr, func: Func, scope: Scope, cas
         const def = context.defs[global.defID];
         const retType = rawTypeForTypeID(context, def.retTypeID);
         const results = compileArgs(context, expr.range, expr.kind.args, func, scope, def.args);
-        const args: InsRef[] = [];
-        for (const result of results) {
-          args.push(unwrapRef(func, context.currentBlock, result.value));
-        }
+        const args = results.map(result => result.value);
         switch (def.kind.kind) {
           case 'Func':
             result = {
               typeID: def.retTypeID,
-              value: addIns(func, context.currentBlock, {kind: 'Call', index: def.kind.index, args, retType}),
+              value: addCall(func, context.currentBlock, def.kind.index, args, retType),
             };
             break;
 
           case 'Import':
             result = {
               typeID: def.retTypeID,
-              value: addIns(func, context.currentBlock, {kind: 'CallImport', index: def.kind.index, args, retType}),
+              value: addCallImport(func, context.currentBlock, def.kind.index, args, retType),
             };
             break;
 
           case 'Intrinsic':
             result = {
               typeID: def.retTypeID,
-              value: addIns(func, context.currentBlock, {kind: 'CallIntrinsic', name: def.kind.name, args, retType}),
+              value: addCallIntrinsic(func, context.currentBlock, def.kind.name, args, retType),
             };
             break;
 

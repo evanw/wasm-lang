@@ -240,7 +240,7 @@ export function unwrapRef(func: Func, block: number, value: ValueRef): InsRef {
   return addLocalGet(func, block, local).ref;
 }
 
-export function addIns(func: Func, block: number, ins: Ins): ValueRef {
+function addIns(func: Func, block: number, ins: Ins): ValueRef {
   const insList = func.blocks[block].insList;
   const index = insList.length;
   insList.push(ins);
@@ -293,6 +293,25 @@ export function addMemAlloc(func: Func, block: number, size: ValueRef): ValueRef
 
 export function addMemFree(func: Func, block: number, ptr: ValueRef, size: ValueRef): void {
   addIns(func, block, {kind: 'MemFree', ptr: unwrapRef(func, block, ptr), size: unwrapRef(func, block, size)});
+}
+
+export function addCall(func: Func, block: number, index: number, values: ValueRef[], retType: RawType): ValueRef {
+  const args = values.map(value => unwrapRef(func, block, value));
+  return addIns(func, block, {kind: 'Call', index, args, retType});
+}
+
+export function addCallImport(func: Func, block: number, index: number, values: ValueRef[], retType: RawType): ValueRef {
+  const args = values.map(value => unwrapRef(func, block, value));
+  return addIns(func, block, {kind: 'CallImport', index, args, retType});
+}
+
+export function addCallIntrinsic(func: Func, block: number, name: string, values: ValueRef[], retType: RawType): ValueRef {
+  const args = values.map(value => unwrapRef(func, block, value));
+  return addIns(func, block, {kind: 'CallIntrinsic', name, args, retType});
+}
+
+export function addPtrGlobal(func: Func, block: number, index: number): ValueRef {
+  return addIns(func, block, {kind: 'PtrGlobal', index});
 }
 
 export function argsOf(ins: Ins): InsRef[] {
