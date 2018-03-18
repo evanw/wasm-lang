@@ -12,6 +12,7 @@ import {
   RawType,
   typeOf,
   isValidIntrinsicSignature,
+  BinIns,
 } from './ssa';
 import { align } from './util';
 
@@ -659,39 +660,50 @@ function encodeIns(context: BlockContext, args: InsRef[], ins: Ins): void {
     case 'Release':
       throw new Error('Not yet implemented');
 
-    case 'Eq32': {
-      const leftConst = getConstant(context.info.func, ins.left);
-      const rightConst = getConstant(context.info.func, ins.right);
-      if (leftConst === 0) {
-        opArgs.push({op: Opcode.I32Eqz, arg: null});
-        args.push(ins.right);
-      } else if (rightConst === 0) {
-        opArgs.push({op: Opcode.I32Eqz, arg: null});
-        args.push(ins.left);
-      } else {
-        opArgs.push({op: Opcode.I32Eq, arg: null});
-        args.push(ins.left, ins.right);
+    case 'Binary': {
+      const {op, left, right} = ins;
+      switch (op) {
+        case BinIns.Eq32: {
+          const leftConst = getConstant(context.info.func, ins.left);
+          const rightConst = getConstant(context.info.func, ins.right);
+          if (leftConst === 0) {
+            opArgs.push({op: Opcode.I32Eqz, arg: null});
+            args.push(ins.right);
+          } else if (rightConst === 0) {
+            opArgs.push({op: Opcode.I32Eqz, arg: null});
+            args.push(ins.left);
+          } else {
+            opArgs.push({op: Opcode.I32Eq, arg: null});
+            args.push(ins.left, ins.right);
+          }
+          break;
+        }
+
+        case BinIns.NotEq32: encodeBinaryIns(args, opArgs, Opcode.I32Ne, left, right); break;
+        case BinIns.And32: encodeBinaryIns(args, opArgs, Opcode.I32And, left, right); break;
+        case BinIns.Or32: encodeBinaryIns(args, opArgs, Opcode.I32Or, left, right); break;
+        case BinIns.Xor32: encodeBinaryIns(args, opArgs, Opcode.I32Xor, left, right); break;
+        case BinIns.Add32: encodeBinaryIns(args, opArgs, Opcode.I32Add, left, right); break;
+        case BinIns.Sub32: encodeBinaryIns(args, opArgs, Opcode.I32Sub, left, right); break;
+        case BinIns.Mul32: encodeBinaryIns(args, opArgs, Opcode.I32Mul, left, right); break;
+        case BinIns.Div32S: encodeBinaryIns(args, opArgs, Opcode.I32DivS, left, right); break;
+        case BinIns.Div32U: encodeBinaryIns(args, opArgs, Opcode.I32DivU, left, right); break;
+        case BinIns.Shl32: encodeBinaryIns(args, opArgs, Opcode.I32Shl, left, right); break;
+        case BinIns.Shr32S: encodeBinaryIns(args, opArgs, Opcode.I32ShrS, left, right); break;
+        case BinIns.Shr32U: encodeBinaryIns(args, opArgs, Opcode.I32ShrU, left, right); break;
+
+        case BinIns.Lt32S: encodeCompareIns(args, opArgs, left, right, Opcode.I32LtS, Opcode.I32GtS); break;
+        case BinIns.Lt32U: encodeCompareIns(args, opArgs, left, right, Opcode.I32LtU, Opcode.I32GtU); break;
+        case BinIns.LtEq32S: encodeCompareIns(args, opArgs, left, right, Opcode.I32LeS, Opcode.I32GeS); break;
+        case BinIns.LtEq32U: encodeCompareIns(args, opArgs, left, right, Opcode.I32LeU, Opcode.I32GeU); break;
+
+        default: {
+          const checkCovered: void = op;
+          throw new Error('Internal error');
+        }
       }
       break;
     }
-
-    case 'NotEq32': encodeBinaryIns(args, opArgs, Opcode.I32Ne, ins.left, ins.right); break;
-    case 'And32': encodeBinaryIns(args, opArgs, Opcode.I32And, ins.left, ins.right); break;
-    case 'Or32': encodeBinaryIns(args, opArgs, Opcode.I32Or, ins.left, ins.right); break;
-    case 'Xor32': encodeBinaryIns(args, opArgs, Opcode.I32Xor, ins.left, ins.right); break;
-    case 'Add32': encodeBinaryIns(args, opArgs, Opcode.I32Add, ins.left, ins.right); break;
-    case 'Sub32': encodeBinaryIns(args, opArgs, Opcode.I32Sub, ins.left, ins.right); break;
-    case 'Mul32': encodeBinaryIns(args, opArgs, Opcode.I32Mul, ins.left, ins.right); break;
-    case 'Div32S': encodeBinaryIns(args, opArgs, Opcode.I32DivS, ins.left, ins.right); break;
-    case 'Div32U': encodeBinaryIns(args, opArgs, Opcode.I32DivU, ins.left, ins.right); break;
-    case 'Shl32': encodeBinaryIns(args, opArgs, Opcode.I32Shl, ins.left, ins.right); break;
-    case 'Shr32S': encodeBinaryIns(args, opArgs, Opcode.I32ShrS, ins.left, ins.right); break;
-    case 'Shr32U': encodeBinaryIns(args, opArgs, Opcode.I32ShrU, ins.left, ins.right); break;
-
-    case 'Lt32S': encodeCompareIns(args, opArgs, ins.left, ins.right, Opcode.I32LtS, Opcode.I32GtS); break;
-    case 'Lt32U': encodeCompareIns(args, opArgs, ins.left, ins.right, Opcode.I32LtU, Opcode.I32GtU); break;
-    case 'LtEq32S': encodeCompareIns(args, opArgs, ins.left, ins.right, Opcode.I32LeS, Opcode.I32GeS); break;
-    case 'LtEq32U': encodeCompareIns(args, opArgs, ins.left, ins.right, Opcode.I32LeU, Opcode.I32GeU); break;
 
     default: {
       const checkCovered: void = ins;

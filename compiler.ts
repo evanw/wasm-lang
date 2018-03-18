@@ -25,6 +25,8 @@ import {
   setJumpGoto,
   setJumpBranch,
   setJumpReturn,
+  addBinary,
+  BinIns,
 } from './ssa';
 import { assert, align } from './util';
 
@@ -516,7 +518,7 @@ function compileMatchOrExpr(context: Context, func: Func, scope: Scope, test: Ex
   // Check for tag equality
   const result = compileExpr(context, test.kind.value, func, scope, global.typeID);
   const tag = addMemGet(func, context.currentBlock, result.value, type.tagOffset, 4);
-  const equals = addIns(func, context.currentBlock, {kind: 'Eq32', left: tag.ref, right: createConstant(func, global.index).ref});
+  const equals = addBinary(func, context.currentBlock, BinIns.Eq32, tag, createConstant(func, global.index));
 
   // The match must have the same number of fields
   const ctor = type.ctors[global.index];
@@ -930,40 +932,28 @@ function compileExpr(context: Context, expr: Expr, func: Func, scope: Scope, cas
     case 'Unary':
       switch (expr.kind.op) {
         case UnOp.Cpl: {
-          const value = compileExpr(context, expr.kind.value, func, scope, context.intTypeID);
+          const operand = compileExpr(context, expr.kind.value, func, scope, context.intTypeID);
           result = {
             typeID: context.intTypeID,
-            value: addIns(func, context.currentBlock, {
-              kind: 'Xor32',
-              left: unwrapRef(func, context.currentBlock, value.value),
-              right: createConstant(func, -1).ref,
-            }),
+            value: addBinary(func, context.currentBlock, BinIns.Xor32, operand.value, createConstant(func, -1)),
           };
           break;
         }
 
         case UnOp.Neg: {
-          const value = compileExpr(context, expr.kind.value, func, scope, context.intTypeID);
+          const operand = compileExpr(context, expr.kind.value, func, scope, context.intTypeID);
           result = {
             typeID: context.intTypeID,
-            value: addIns(func, context.currentBlock, {
-              kind: 'Sub32',
-              left: createConstant(func, 0).ref,
-              right: unwrapRef(func, context.currentBlock, value.value),
-            }),
+            value: addBinary(func, context.currentBlock, BinIns.Sub32, createConstant(func, 0), operand.value),
           };
           break;
         }
 
         case UnOp.Not: {
-          const value = compileExpr(context, expr.kind.value, func, scope, context.boolTypeID);
+          const operand = compileExpr(context, expr.kind.value, func, scope, context.boolTypeID);
           result = {
             typeID: context.boolTypeID,
-            value: addIns(func, context.currentBlock, {
-              kind: 'Eq32',
-              left: unwrapRef(func, context.currentBlock, value.value),
-              right: createConstant(func, 0).ref,
-            }),
+            value: addBinary(func, context.currentBlock, BinIns.Eq32, operand.value, createConstant(func, 0)),
           };
           break;
         }
@@ -1203,66 +1193,57 @@ function compileEqual(context: Context, func: Func, scope: Scope, op: BinOp, lef
     };
   }
 
-  const left = unwrapRef(func, context.currentBlock, l.value);
-  const right = unwrapRef(func, context.currentBlock, r.value);
-  let ins: Ins;
+  let ins: BinIns;
 
   switch (op) {
-    case BinOp.Eq: ins = {kind: 'Eq32', left, right}; break;
-    case BinOp.NotEq: ins = {kind: 'NotEq32', left, right}; break;
+    case BinOp.Eq: ins = BinIns.Eq32; break;
+    case BinOp.NotEq: ins = BinIns.NotEq32; break;
     default: throw new Error('Internal error');
   }
 
   return {
     typeID: context.boolTypeID,
-    value: addIns(func, context.currentBlock, ins),
+    value: addBinary(func, context.currentBlock, ins, l.value, r.value),
   };
 }
 
 function compileCompare32(context: Context, func: Func, scope: Scope, op: BinOp, leftExpr: Expr, rightExpr: Expr): Result {
-  const l = compileExpr(context, leftExpr, func, scope, context.intTypeID);
-  const r = compileExpr(context, rightExpr, func, scope, context.intTypeID);
-  const left = unwrapRef(func, context.currentBlock, l.value);
-  const right = unwrapRef(func, context.currentBlock, r.value);
-  let ins: Ins;
+  const left = compileExpr(context, leftExpr, func, scope, context.intTypeID).value;
+  const right = compileExpr(context, rightExpr, func, scope, context.intTypeID).value;
+  let value: ValueRef;
 
   switch (op) {
-    case BinOp.Lt: ins = {kind: 'Lt32S', left, right}; break;
-    case BinOp.LtEq: ins = {kind: 'LtEq32S', left, right}; break;
-    case BinOp.Gt: ins = {kind: 'Lt32S', left: right, right: left}; break;
-    case BinOp.GtEq: ins = {kind: 'LtEq32S', left: right, right: left}; break;
+    case BinOp.Lt: value = addBinary(func, context.currentBlock, BinIns.Lt32S, left, right); break;
+    case BinOp.LtEq: value = addBinary(func, context.currentBlock, BinIns.LtEq32S, left, right); break;
+    case BinOp.Gt: value = addBinary(func, context.currentBlock, BinIns.Lt32S, right, left); break;
+    case BinOp.GtEq: value = addBinary(func, context.currentBlock, BinIns.LtEq32S, right, left); break;
     default: throw new Error('Internal error');
   }
 
-  return {
-    typeID: context.boolTypeID,
-    value: addIns(func, context.currentBlock, ins),
-  };
+  return {typeID: context.boolTypeID, value};
 }
 
 function compileMath32(context: Context, func: Func, scope: Scope, op: BinOp, leftExpr: Expr, rightExpr: Expr): Result {
-  const l = compileExpr(context, leftExpr, func, scope, context.intTypeID);
-  const r = compileExpr(context, rightExpr, func, scope, context.intTypeID);
-  const left = unwrapRef(func, context.currentBlock, l.value);
-  const right = unwrapRef(func, context.currentBlock, r.value);
-  let ins: Ins;
+  let ins: BinIns;
 
   switch (op) {
-    case BinOp.BitOr: ins = {kind: 'Or32', left, right}; break;
-    case BinOp.BitXor: ins = {kind: 'Xor32', left, right}; break;
-    case BinOp.BitAnd: ins = {kind: 'And32', left, right}; break;
-    case BinOp.Add: ins = {kind: 'Add32', left, right}; break;
-    case BinOp.Sub: ins = {kind: 'Sub32', left, right}; break;
-    case BinOp.Mul: ins = {kind: 'Mul32', left, right}; break;
-    case BinOp.Div: ins = {kind: 'Div32S', left, right}; break;
-    case BinOp.Shl: ins = {kind: 'Shl32', left, right}; break;
-    case BinOp.Shr: ins = {kind: 'Shr32S', left, right}; break;
+    case BinOp.BitOr: ins = BinIns.Or32; break;
+    case BinOp.BitXor: ins = BinIns.Xor32; break;
+    case BinOp.BitAnd: ins = BinIns.And32; break;
+    case BinOp.Add: ins = BinIns.Add32; break;
+    case BinOp.Sub: ins = BinIns.Sub32; break;
+    case BinOp.Mul: ins = BinIns.Mul32; break;
+    case BinOp.Div: ins = BinIns.Div32S; break;
+    case BinOp.Shl: ins = BinIns.Shl32; break;
+    case BinOp.Shr: ins = BinIns.Shr32S; break;
     default: throw new Error('Internal error');
   }
 
   return {
     typeID: context.intTypeID,
-    value: addIns(func, context.currentBlock, ins),
+    value: addBinary(func, context.currentBlock, ins,
+      compileExpr(context, leftExpr, func, scope, context.intTypeID).value,
+      compileExpr(context, rightExpr, func, scope, context.intTypeID).value),
   };
 }
 

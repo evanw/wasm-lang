@@ -12,6 +12,26 @@ export enum RawType {
   I64,
 }
 
+export enum BinIns {
+  Eq32,
+  NotEq32,
+  Lt32S,
+  Lt32U,
+  LtEq32S,
+  LtEq32U,
+  And32,
+  Or32,
+  Xor32,
+  Add32,
+  Sub32,
+  Mul32,
+  Div32S,
+  Div32U,
+  Shl32,
+  Shr32S,
+  Shr32U,
+}
+
 export type Ins =
   {kind: 'Call', index: number, args: InsRef[], retType: RawType} |
   {kind: 'CallImport', index: number, args: InsRef[], retType: RawType} |
@@ -34,24 +54,7 @@ export type Ins =
   {kind: 'Retain', ptr: InsRef} |
   {kind: 'Release', ptr: InsRef, dtor: number} |
 
-  {kind: 'Eq32', left: InsRef, right: InsRef} |
-  {kind: 'NotEq32', left: InsRef, right: InsRef} |
-  {kind: 'Lt32S', left: InsRef, right: InsRef} |
-  {kind: 'Lt32U', left: InsRef, right: InsRef} |
-  {kind: 'LtEq32S', left: InsRef, right: InsRef} |
-  {kind: 'LtEq32U', left: InsRef, right: InsRef} |
-
-  {kind: 'And32', left: InsRef, right: InsRef} |
-  {kind: 'Or32', left: InsRef, right: InsRef} |
-  {kind: 'Xor32', left: InsRef, right: InsRef} |
-  {kind: 'Add32', left: InsRef, right: InsRef} |
-  {kind: 'Sub32', left: InsRef, right: InsRef} |
-  {kind: 'Mul32', left: InsRef, right: InsRef} |
-  {kind: 'Div32S', left: InsRef, right: InsRef} |
-  {kind: 'Div32U', left: InsRef, right: InsRef} |
-  {kind: 'Shl32', left: InsRef, right: InsRef} |
-  {kind: 'Shr32S', left: InsRef, right: InsRef} |
-  {kind: 'Shr32U', left: InsRef, right: InsRef};
+  {kind: 'Binary', op: BinIns, left: InsRef, right: InsRef};
 
 // Unlike in other compilers, BasicBlocks form a tree instead of a block soup.
 // This makes it possible to emit the structured output that WebAssembly
@@ -244,6 +247,10 @@ export function addIns(func: Func, block: number, ins: Ins): ValueRef {
   return {block, ref: {index}};
 }
 
+export function addBinary(func: Func, block: number, op: BinIns, left: ValueRef, right: ValueRef): ValueRef {
+  return addIns(func, block, {kind: 'Binary', op, left: unwrapRef(func, block, left), right: unwrapRef(func, block, right)});
+}
+
 export function addMemGet(func: Func, block: number, addr: ValueRef, offset: number, size: number): ValueRef {
   const ptr = unwrapRef(func, block, addr);
   switch (size) {
@@ -303,24 +310,7 @@ export function argsOf(ins: Ins): InsRef[] {
     case 'Retain': return [ins.ptr];
     case 'Release': return [ins.ptr];
 
-    case 'Eq32': return [ins.left, ins.right];
-    case 'NotEq32': return [ins.left, ins.right];
-    case 'Lt32S': return [ins.left, ins.right];
-    case 'Lt32U': return [ins.left, ins.right];
-    case 'LtEq32S': return [ins.left, ins.right];
-    case 'LtEq32U': return [ins.left, ins.right];
-
-    case 'And32': return [ins.left, ins.right];
-    case 'Or32': return [ins.left, ins.right];
-    case 'Xor32': return [ins.left, ins.right];
-    case 'Add32': return [ins.left, ins.right];
-    case 'Sub32': return [ins.left, ins.right];
-    case 'Mul32': return [ins.left, ins.right];
-    case 'Div32S': return [ins.left, ins.right];
-    case 'Div32U': return [ins.left, ins.right];
-    case 'Shl32': return [ins.left, ins.right];
-    case 'Shr32S': return [ins.left, ins.right];
-    case 'Shr32U': return [ins.left, ins.right];
+    case 'Binary': return [ins.left, ins.right];
 
     default: {
       const checkCovered: void = ins;
@@ -450,24 +440,35 @@ function blockToString(context: ToStringContext, block: BasicBlock, indent: stri
         text += `${indent}release ${refToString(context.func, ins.ptr)}, ${context.code.funcs[ins.dtor].name}\n`;
         break;
 
-      case 'Eq32': text += binaryToString(context, i, 'i32.eq', indent, ins.left, ins.right); break;
-      case 'NotEq32': text += binaryToString(context, i, 'i32.ne', indent, ins.left, ins.right); break;
-      case 'Lt32S': text += binaryToString(context, i, 'i32.lt_s', indent, ins.left, ins.right); break;
-      case 'Lt32U': text += binaryToString(context, i, 'i32.lt_u', indent, ins.left, ins.right); break;
-      case 'LtEq32S': text += binaryToString(context, i, 'i32.lte_s', indent, ins.left, ins.right); break;
-      case 'LtEq32U': text += binaryToString(context, i, 'i32.lte_u', indent, ins.left, ins.right); break;
+      case 'Binary': {
+        const {op, left, right} = ins;
+        switch (op) {
+          case BinIns.Eq32: text += binaryToString(context, i, 'i32.eq', indent, left, right); break;
+          case BinIns.NotEq32: text += binaryToString(context, i, 'i32.ne', indent, left, right); break;
+          case BinIns.Lt32S: text += binaryToString(context, i, 'i32.lt_s', indent, left, right); break;
+          case BinIns.Lt32U: text += binaryToString(context, i, 'i32.lt_u', indent, left, right); break;
+          case BinIns.LtEq32S: text += binaryToString(context, i, 'i32.lte_s', indent, left, right); break;
+          case BinIns.LtEq32U: text += binaryToString(context, i, 'i32.lte_u', indent, left, right); break;
 
-      case 'And32': text += binaryToString(context, i, 'i32.and', indent, ins.left, ins.right); break;
-      case 'Or32': text += binaryToString(context, i, 'i32.or', indent, ins.left, ins.right); break;
-      case 'Xor32': text += binaryToString(context, i, 'i32.xor', indent, ins.left, ins.right); break;
-      case 'Add32': text += binaryToString(context, i, 'i32.add', indent, ins.left, ins.right); break;
-      case 'Sub32': text += binaryToString(context, i, 'i32.sub', indent, ins.left, ins.right); break;
-      case 'Mul32': text += binaryToString(context, i, 'i32.mul', indent, ins.left, ins.right); break;
-      case 'Div32S': text += binaryToString(context, i, 'i32.div_s', indent, ins.left, ins.right); break;
-      case 'Div32U': text += binaryToString(context, i, 'i32.div_u', indent, ins.left, ins.right); break;
-      case 'Shl32': text += binaryToString(context, i, 'i32.shl', indent, ins.left, ins.right); break;
-      case 'Shr32S': text += binaryToString(context, i, 'i32.shr_s', indent, ins.left, ins.right); break;
-      case 'Shr32U': text += binaryToString(context, i, 'i32.shr_u', indent, ins.left, ins.right); break;
+          case BinIns.And32: text += binaryToString(context, i, 'i32.and', indent, left, right); break;
+          case BinIns.Or32: text += binaryToString(context, i, 'i32.or', indent, left, right); break;
+          case BinIns.Xor32: text += binaryToString(context, i, 'i32.xor', indent, left, right); break;
+          case BinIns.Add32: text += binaryToString(context, i, 'i32.add', indent, left, right); break;
+          case BinIns.Sub32: text += binaryToString(context, i, 'i32.sub', indent, left, right); break;
+          case BinIns.Mul32: text += binaryToString(context, i, 'i32.mul', indent, left, right); break;
+          case BinIns.Div32S: text += binaryToString(context, i, 'i32.div_s', indent, left, right); break;
+          case BinIns.Div32U: text += binaryToString(context, i, 'i32.div_u', indent, left, right); break;
+          case BinIns.Shl32: text += binaryToString(context, i, 'i32.shl', indent, left, right); break;
+          case BinIns.Shr32S: text += binaryToString(context, i, 'i32.shr_s', indent, left, right); break;
+          case BinIns.Shr32U: text += binaryToString(context, i, 'i32.shr_u', indent, left, right); break;
+
+          default: {
+            const checkCovered: void = op;
+            throw new Error('Internal error');
+          }
+        }
+        break;
+      }
 
       default: {
         const checkCovered: void = ins;
@@ -631,23 +632,7 @@ export function typeOf(func: Func, block: number, ref: InsRef): RawType {
 
     case 'MemGet8':
     case 'MemGet32':
-    case 'Eq32':
-    case 'NotEq32':
-    case 'Lt32S':
-    case 'Lt32U':
-    case 'LtEq32S':
-    case 'LtEq32U':
-    case 'Add32':
-    case 'Sub32':
-    case 'Mul32':
-    case 'Div32S':
-    case 'Div32U':
-    case 'And32':
-    case 'Or32':
-    case 'Xor32':
-    case 'Shl32':
-    case 'Shr32S':
-    case 'Shr32U':
+    case 'Binary':
       return RawType.I32;
 
     default: {
