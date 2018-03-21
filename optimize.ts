@@ -50,6 +50,10 @@ export function optimize(func: Func): void {
           ins.size = mapAlias(ins.size);
           break;
 
+        case 'MemCheck':
+          ins.ptr = mapAlias(ins.ptr);
+          break;
+
         case 'MemGet8':
         case 'MemGet32':
           ins.ptr = mapAlias(ins.ptr);

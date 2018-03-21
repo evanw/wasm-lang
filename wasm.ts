@@ -574,6 +574,16 @@ function encodeIns(context: BlockContext, args: InsRef[], ins: Ins): void {
       break;
     }
 
+    case 'MemCheck': {
+      const checkIndex = context.info.code.checkIndex;
+      if (checkIndex === null) {
+        throw new Error('Cannot check memory because "check" is missing');
+      }
+      opArgs.push({op: Opcode.Call, arg: context.info.typeInfo.funcRemap[checkIndex]});
+      args.push(ins.ptr);
+      break;
+    }
+
     case 'MemGet8':
       opArgs.push({op: Opcode.I32Load8U, arg: ins.offset});
       args.push(ins.ptr);
@@ -610,7 +620,7 @@ function encodeIns(context: BlockContext, args: InsRef[], ins: Ins): void {
       const argTypes: RawType[] = [];
       for (const arg of ins.args) {
         const isConstant = getConstant(func, arg) !== null;
-        argTypes.push(isConstant ? RawType.I32 : typeOf(func, context.blockIndex, arg));
+        argTypes.push(isConstant ? RawType.I32 : typeOf(func, context.blockIndex, arg.index));
       }
 
       switch (ins.name) {
@@ -890,7 +900,7 @@ function visitArg(context: BlockContext, arg: InsRef, {isInlineAllowed}: {isInli
   // Otherwise this value will have to be generated separately,
   // saved to a local, and then loaded from a local here
   else {
-    const type = typeOf(context.info.func, context.blockIndex, {index: arg.index});
+    const type = typeOf(context.info.func, context.blockIndex, arg.index);
     context.opArgs.push({
       op: Opcode.GetLocal,
       arg: createTemporary(context.locals, context.blockIndex, arg.index, type),
@@ -1009,8 +1019,12 @@ function encodeBlockTree(
       opArgs.push({op: Opcode.SetLocal, arg: local});
     }
 
+    // Drop unused arguments since WebAssembly requires a balanced stack
+    if (context.uses[context.insIndex] === 0 && typeOf(info.func, blockIndex, context.insIndex) !== RawType.Void) {
+      opArgs.push({op: Opcode.Drop, arg: null});
+    }
+
     visitIns(context);
-    // TODO: may need a "drop" here
   }
 
   // Loops in WebAssembly are a special block where the label comes before the

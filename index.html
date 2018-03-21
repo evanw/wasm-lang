@@ -13,7 +13,7 @@
     width: 100%;
   }
 </style>
-<script src="compiled.js"></script>
+<script src="main-bundle.js"></script>
 <script src="libwabt.js"></script>
 <table>
   <tr>
@@ -64,7 +64,7 @@ def main() int {
 <script>
   const update = () => {
     try {
-      var {log, wasm, debug} = Compiler.run(stdin.value);
+      var {log, wasm, debug, imports} = Compiler.run(stdin.value);
     } catch (e) {
       log = e.stack;
     }
@@ -79,20 +79,9 @@ def main() int {
       module.applyNames();
       stdout.value = displayIR ? debug : module.toText({foldExprs: true, inlineExport: true});
       run.onclick = async () => {
-        const ptrs = new Map;
-        const imports = {
-          afterMalloc(ptr, size) {
-            ptrs.set(ptr, size);
-          },
-          afterFree(ptr, size) {
-            if (!ptrs.has(ptr)) throw new Error(`Free of invalid pointer ${ptr}`);
-            if (ptrs.get(ptr) !== size) throw new Error(`Free of size ${ptr} for allocation of size ${ptrs.get(ptr)}`);
-            ptrs.delete(ptr);
-          },
-        };
         try {
           const {instance} = await WebAssembly.instantiate(wasm, {imports});
-          stdout.value = `main(): ${instance.exports.main()}\nleaks: ${ptrs.size}`;
+          stdout.value = `main(): ${instance.exports.main()}\nleaks: ${imports.leaks()}`;
         } catch (e) {
           stdout.value = e;
         }

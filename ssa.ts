@@ -44,6 +44,7 @@ export type Ins =
 
   {kind: 'MemAlloc', size: InsRef} |
   {kind: 'MemFree', ptr: InsRef, size: InsRef} |
+  {kind: 'MemCheck', ptr: InsRef} |
 
   {kind: 'MemGet8', ptr: InsRef, offset: number} |
   {kind: 'MemSet8', ptr: InsRef, offset: number, value: InsRef} |
@@ -156,6 +157,7 @@ export interface Code {
   imports: Import[];
   mallocIndex: number | null;
   freeIndex: number | null;
+  checkIndex: number | null;
 }
 
 export function createCode(): Code {
@@ -165,6 +167,7 @@ export function createCode(): Code {
     imports: [],
     mallocIndex: null,
     freeIndex: null,
+    checkIndex: null,
   };
 }
 
@@ -294,7 +297,12 @@ export function addMemAlloc(func: Func, block: number, size: ValueRef): ValueRef
 }
 
 export function addMemFree(func: Func, block: number, ptr: ValueRef, size: ValueRef): void {
+  addMemCheck(func, block, ptr);
   addIns(func, block, {kind: 'MemFree', ptr: unwrapRef(func, block, ptr), size: unwrapRef(func, block, size)});
+}
+
+export function addMemCheck(func: Func, block: number, ptr: ValueRef): void {
+  addIns(func, block, {kind: 'MemCheck', ptr: unwrapRef(func, block, ptr)});
 }
 
 export function addCall(func: Func, block: number, index: number, values: ValueRef[], retType: RawType): ValueRef {
@@ -317,10 +325,12 @@ export function addPtrGlobal(func: Func, block: number, index: number): ValueRef
 }
 
 export function addRetain(func: Func, block: number, ptr: ValueRef): void {
+  addMemCheck(func, block, ptr);
   addIns(func, block, {kind: 'Retain', ptr: unwrapRef(func, block, ptr)});
 }
 
 export function addRelease(func: Func, block: number, ptr: ValueRef, dtor: number): void {
+  addMemCheck(func, block, ptr);
   addIns(func, block, {kind: 'Release', ptr: unwrapRef(func, block, ptr), dtor});
 }
 
@@ -337,6 +347,7 @@ export function argsOf(ins: Ins): InsRef[] {
 
     case 'MemAlloc': return [ins.size];
     case 'MemFree': return [ins.ptr, ins.size];
+    case 'MemCheck': return [ins.ptr];
 
     case 'MemGet8': return [ins.ptr];
     case 'MemSet8': return [ins.ptr, ins.value];
@@ -445,6 +456,10 @@ function blockToString(context: ToStringContext, block: BasicBlock, indent: stri
 
       case 'MemFree':
         text += `${indent}t${i} = mem.free ${refToString(context.func, ins.ptr)}, ${refToString(context.func, ins.size)}\n`;
+        break;
+
+      case 'MemCheck':
+        text += `${indent}t${i} = mem.check ${refToString(context.func, ins.ptr)}\n`;
         break;
 
       case 'MemGet8':
@@ -637,15 +652,15 @@ function spillToLocal(func: Func, block: number, ref: InsRef): number {
   const spills = func.blocks[block].spills;
   const spill = spills.get(ref.index);
   if (spill !== undefined) return spill;
-  const local = createLocal(func, typeOf(func, block, ref));
+  const local = createLocal(func, typeOf(func, block, ref.index));
   addLocalSet(func, block, local, {block, ref});
   spills.set(ref.index, local);
   return local;
 }
 
-export function typeOf(func: Func, block: number, ref: InsRef): RawType {
+export function typeOf(func: Func, block: number, index: number): RawType {
   const target = func.blocks[block];
-  const ins = target.insList[ref.index];
+  const ins = target.insList[index];
 
   switch (ins.kind) {
     case 'LocalGet':
@@ -653,6 +668,7 @@ export function typeOf(func: Func, block: number, ref: InsRef): RawType {
 
     case 'Nop':
     case 'MemFree':
+    case 'MemCheck':
     case 'MemSet8':
     case 'MemSet32':
     case 'LocalSet':

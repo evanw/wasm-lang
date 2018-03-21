@@ -223,6 +223,8 @@ function afterControlFlowFork(context: Context): void {
 }
 
 function trackTemporary(context: Context, func: Func, value: ValueRef, typeID: TypeID): void {
+  assert(context.types[typeID.index].hasRefCount);
+
   // The common case of straight-line control flow is easy
   if (context.controlFlowExprDepth === 0) {
     context.temporaries.push({kind: 'Normal', typeID, value});
@@ -322,6 +324,13 @@ function compileTypes(context: Context, parsed: Parsed): void {
   const ptrBytes = context.ptrType === RawType.I64 ? 8 : 4;
   const list: [TypeID, CtorDecl[]][] = [];
 
+  // Prepare built-in types
+  context.errorTypeID = addTypeID(context, {source: -1, start: 0, end: 0}, '(error)', 0);
+  context.voidTypeID = addTypeID(context, {source: -1, start: 0, end: 0}, '(void)', 0);
+  const errorType = context.types[context.errorTypeID.index];
+  const voidType = context.types[context.voidTypeID.index];
+  errorType.hasRefCount = voidType.hasRefCount = false;
+
   // Add type names first
   for (const decl of parsed.types) {
     if (decl.params.length !== 0) {
@@ -357,7 +366,7 @@ function compileTypes(context: Context, parsed: Parsed): void {
     list.push([typeID, ctors]);
   }
 
-  // Bind built-in types
+  // Bind primitive types
   context.boolTypeID = resolveTypeName(context, {source: -1, start: 0, end: 0}, 'bool');
   context.intTypeID = resolveTypeName(context, {source: -1, start: 0, end: 0}, 'int');
 
@@ -529,6 +538,13 @@ function getStringArg(context: Context, tag: Tag): string | null {
   return arg.kind.value;
 }
 
+function retainResult(context: Context, func: Func, result: Result): void {
+  const type = context.types[result.typeID.index];
+  if (type.hasRefCount) {
+    addRetain(func, context.currentBlock, result.value);
+  }
+}
+
 function compileDefs(context: Context, parsed: Parsed): void {
   const exportNames = new Set<string>();
   const list: [number, DefDecl][] = [];
@@ -612,6 +628,8 @@ function compileDefs(context: Context, parsed: Parsed): void {
           context.code.mallocIndex = index;
         } else if (def.name === "_free") {
           context.code.freeIndex = index;
+        } else if (def.name === "_check") {
+          context.code.checkIndex = index;
         }
       }
     }
@@ -748,6 +766,13 @@ function releaseLocalsForScope(context: Context, func: Func, scope: Scope): void
   }
 }
 
+function releaseLocalsForScopesUpTo(context: Context, func: Func, scope: Scope | null, upTo: Scope | null): void {
+  while (scope !== null && scope !== upTo) {
+    releaseLocalsForScope(context, func, scope);
+    scope = scope.parent;
+  }
+}
+
 function compileStmts(context: Context, stmts: Stmt[], func: Func, parent: Scope, retTypeID: TypeID): void {
   const scope = createScope(parent);
 
@@ -779,12 +804,8 @@ function compileStmts(context: Context, stmts: Stmt[], func: Func, parent: Scope
           initial = compileExpr(context, value, func, scope, typeID);
         }
 
-        // Retain the value before we store it
-        if (context.types[typeID.index].hasRefCount) {
-          addRetain(func, context.currentBlock, initial.value);
-        }
-
         const local = defineLocal(context, func, scope, stmt.kind.name, stmt.kind.nameRange, typeID);
+        retainResult(context, func, initial);
         addLocalSet(func, context.currentBlock, local, initial.value);
         releaseTemporaries(context, func);
         break;
@@ -797,7 +818,9 @@ function compileStmts(context: Context, stmts: Stmt[], func: Func, parent: Scope
             appendToLog(context.log, stmt.kind.value.range, `Unexpected return value in a function without a return type`);
           } else {
             const result = compileExpr(context, stmt.kind.value, func, scope, retTypeID);
+            retainResult(context, func, result);
             releaseTemporaries(context, func);
+            releaseLocalsForScopesUpTo(context, func, scope, null);
             setJumpReturn(func, context.currentBlock, result.value);
           }
         }
@@ -808,6 +831,7 @@ function compileStmts(context: Context, stmts: Stmt[], func: Func, parent: Scope
             appendToLog(context.log, stmt.range, `Must return a value of type "${context.types[retTypeID.index].name}"`);
           } else {
             releaseTemporaries(context, func);
+            releaseLocalsForScopesUpTo(context, func, scope, null);
             setJumpReturn(func, context.currentBlock, null);
           }
         }
@@ -823,9 +847,7 @@ function compileStmts(context: Context, stmts: Stmt[], func: Func, parent: Scope
         // The parser handles out-of-bounds error reporting
         if (count >= 1 && count <= context.loops.length) {
           const loop = context.loops[context.loops.length - count];
-          for (let s: Scope | null = scope; s !== null && s !== loop.scope; s = s.parent) {
-            releaseLocalsForScope(context, func, s);
-          }
+          releaseLocalsForScopesUpTo(context, func, scope, loop.scope);
           setJumpGoto(func, context.currentBlock, {kind: 'Next', parent: loop.block});
 
           // Add any dead code following this statement to an unused block
@@ -840,9 +862,7 @@ function compileStmts(context: Context, stmts: Stmt[], func: Func, parent: Scope
         // The parser handles out-of-bounds error reporting
         if (count >= 1 && count <= context.loops.length) {
           const loop = context.loops[context.loops.length - count];
-          for (let s: Scope | null = scope; s !== null && s !== loop.scope; s = s.parent) {
-            releaseLocalsForScope(context, func, s);
-          }
+          releaseLocalsForScopesUpTo(context, func, scope, loop.scope);
           setJumpGoto(func, context.currentBlock, {kind: 'Loop', parent: loop.block});
 
           // Add any dead code following this statement to an unused block
@@ -1134,14 +1154,9 @@ function allocType(context: Context, func: Func, typeID: TypeID, ctorIndex: numb
   for (let i = 0; i < args.length; i++) {
     const fieldType = context.types[ctor.args[i].typeID.index];
     const size = fieldType.fieldSize;
-    const value = args[i].value;
-
-    // Retain the value before we store it
-    if (fieldType.hasRefCount) {
-      addRetain(func, context.currentBlock, value);
-    }
-
-    addMemSet(func, context.currentBlock, ptr, ctor.fieldOffsets[i], size, value);
+    const arg = args[i];
+    retainResult(context, func, arg);
+    addMemSet(func, context.currentBlock, ptr, ctor.fieldOffsets[i], size, arg.value);
   }
 
   // Release this object at the end of the statement if it wasn't stored anywhere
@@ -1356,6 +1371,12 @@ function compileExpr(context: Context, expr: Expr, func: Func, scope: Scope, cas
             const checkCovered: void = def.kind;
             throw new Error('Internal error');
           }
+        }
+
+        // We own a reference count on the returned object, so make sure it's released
+        const type = context.types[result.typeID.index];
+        if (type.hasRefCount) {
+          trackTemporary(context, func, result.value, result.typeID);
         }
       }
 
@@ -1686,8 +1707,6 @@ export function compile(log: Log, parsed: Parsed, ptrType: RawType): Code {
     intTypeID: {index: 0},
   };
 
-  context.errorTypeID = addTypeID(context, {source: -1, start: 0, end: 0}, '(error)', 0);
-  context.voidTypeID = addTypeID(context, {source: -1, start: 0, end: 0}, '(void)', 0);
   compileTypes(context, parsed);
   compileVars(context, parsed);
   compileDefs(context, parsed);
