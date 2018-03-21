@@ -459,7 +459,7 @@ function blockToString(context: ToStringContext, block: BasicBlock, indent: stri
         break;
 
       case 'MemCheck':
-        text += `${indent}t${i} = mem.check ${refToString(context.func, ins.ptr)}\n`;
+        text += `${indent}mem.check ${refToString(context.func, ins.ptr)}\n`;
         break;
 
       case 'MemGet8':
