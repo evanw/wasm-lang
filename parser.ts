@@ -677,7 +677,7 @@ function parseStmts(lexer: Lexer, enclosingLoopCount: number): Stmt[] | null {
 
       case Token.Return: {
         advance(lexer);
-        if (lexer.token === Token.Newline || lexer.token === Token.CloseBrace) {
+        if (lexer.token === Token.Newline || lexer.token as Token === Token.CloseBrace) {
           stmts.push({range: spanSince(lexer, start), kind: {kind: 'Return', value: null}});
         } else {
           const value = parseExpr(lexer, LEVEL_LOWEST);
@@ -933,7 +933,7 @@ export function parse(log: Log, text: string, source: number, parsed: Parsed): b
     }
 
     // Declarations must be separated by newlines
-    if (lexer.token !== Token.EndOfFile && !expect(lexer, Token.Newline)) {
+    if (lexer.token as Token !== Token.EndOfFile && !expect(lexer, Token.Newline)) {
       return false;
     }
   }
