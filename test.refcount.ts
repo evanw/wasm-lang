@@ -1,8 +1,6 @@
 import { assert } from "./util";
 import { run } from "./test";
-
-declare const describe: any;
-declare const it: any;
+import { describe, it } from "node:test";
 
 describe('return void', () => {
   it('bare ctor', async () => {

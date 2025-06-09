@@ -5,3 +5,6 @@ build: | node_modules
 
 node_modules:
 	npm ci
+
+test:
+	node_modules/.bin/esbuild --bundle test.ts --platform=node | node

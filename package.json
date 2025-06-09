@@ -1,5 +1,6 @@
 {
   "dependencies": {
+    "@types/node": "22.15.30",
     "esbuild": "0.25.5"
   }
 }
